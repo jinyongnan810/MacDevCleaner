@@ -20,12 +20,6 @@ nonisolated enum FindingCategory: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-nonisolated struct ScanRoot: Identifiable, Sendable {
-    let url: URL
-    let isHome: Bool
-    var id: String { url.path }
-}
-
 nonisolated struct Finding: Identifiable, Sendable {
     let url: URL
     let title: String
@@ -46,6 +40,15 @@ nonisolated struct Finding: Identifiable, Sendable {
 nonisolated struct ScanReport: Sendable {
     var findings: [Finding] = []
     var issues: [String] = []
+    var directoriesVisited = 0
+    var inaccessibleLocations = 0
+    var volumesScanned = 0
+}
+
+nonisolated struct ScanProgress: Sendable {
+    var path = "/"
+    var directoriesVisited = 0
+    var findingsCount = 0
 }
 
 /// Filesystem work is isolated from the UI. Never launches a process or modifies scanned files.
@@ -61,94 +64,119 @@ actor StorageScanner {
         var command: String?
     }
 
-    func scan(roots: [ScanRoot]) throws -> ScanReport {
+    /// Discover local volumes automatically; never request a folder or elevate privileges.
+    func scanMac(progress: @Sendable (ScanProgress) async -> Void) async throws -> ScanReport {
+        var roots = [URL(fileURLWithPath: "/", isDirectory: true)]
+        let volumes = manager.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeIsLocalKey, .volumeIsBrowsableKey], options: [.skipHiddenVolumes]) ?? []
+        for volume in volumes where volume.path.hasPrefix("/Volumes/") {
+            let values = try? volume.resourceValues(forKeys: [.volumeIsLocalKey, .volumeIsBrowsableKey])
+            if values?.volumeIsLocal == true, values?.volumeIsBrowsable != false {
+                roots.append(volume)
+            }
+        }
+        return try await scan(roots: roots, progress: progress)
+    }
+
+    // The explicit roots entry point also supports isolated filesystem verification.
+    func scan(roots: [URL], progress: @Sendable (ScanProgress) async -> Void) async throws -> ScanReport {
         var report = ScanReport()
         var measured: Set<String> = []
         for root in roots {
             try Task.checkCancellation()
-            if root.isHome {
-                for rule in homeRules {
-                    try Task.checkCancellation()
-                    let url = root.url.appendingPathComponent(rule.path)
-                    do {
-                        guard try hasNoSymlinks(url, within: root.url) else { continue }
-                        let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-                        guard values.isDirectory == true, values.isSymbolicLink != true else { continue }
-                        try record(url, rule: rule, measured: &measured, report: &report)
-                    } catch let error as CocoaError where error.code == .fileReadNoSuchFile { continue }
-                    catch is CancellationError { throw CancellationError() }
-                    catch { report.issues.append("\(url.path): \(error.localizedDescription)") }
-                }
-            } else {
-                try scanProjects(root.url, measured: &measured, report: &report)
-            }
+            try await scanTree(root, measured: &measured, report: &report, progress: progress)
+            report.volumesScanned += 1
         }
         report.findings.sort { $0.bytes > $1.bytes }
         return report
     }
 
-    private var homeRules: [Rule] {
-        [Rule(path: "Library/Developer/Xcode/DerivedData", title: "Xcode Derived Data", ecosystem: "Xcode"),
-         Rule(path: "Library/Caches/org.swift.swiftpm", title: "Swift package cache", ecosystem: "Swift"),
-         Rule(path: ".npm/_cacache", title: "npm download cache", ecosystem: "Node.js"),
-         Rule(path: "Library/Caches/Yarn", title: "Yarn cache", ecosystem: "Node.js"),
-         Rule(path: "Library/pnpm/store", title: "pnpm store", ecosystem: "Node.js"),
-         Rule(path: "Library/Caches/pip", title: "pip download cache", ecosystem: "Python"),
-         Rule(path: "Library/Caches/uv", title: "uv cache", ecosystem: "Python"),
-         Rule(path: "Library/Caches/Homebrew", title: "Homebrew downloads", ecosystem: "Homebrew"),
-         Rule(path: ".gradle/caches", title: "Gradle cache", ecosystem: "Java / Kotlin"),
-         Rule(path: ".cargo/registry", title: "Cargo registry", ecosystem: "Rust"),
-         Rule(path: ".nvm/versions", title: "Node.js versions", ecosystem: "nvm", category: .tools),
-         Rule(path: ".pyenv/versions", title: "Python versions", ecosystem: "pyenv", category: .tools),
-         Rule(path: ".rustup/toolchains", title: "Rust toolchains", ecosystem: "Rust", category: .tools),
-         Rule(path: "Library/Python", title: "User Python packages", ecosystem: "Python", category: .tools),
-         Rule(path: ".local/pipx/venvs", title: "pipx environments", ecosystem: "Python", category: .tools),
-         Rule(path: "Library/Containers/com.docker.docker/Data/vms", title: "Docker virtual machines", ecosystem: "Docker", category: .tools, command: "docker system df -v"),
-         Rule(path: "Library/Application Support/com.apple.container", title: "Apple container storage", ecosystem: "Apple container", category: .tools, command: "container image list")]
+    private let homeRules: [Rule] = [Rule(path: "Library/Developer/Xcode/DerivedData", title: "Xcode Derived Data", ecosystem: "Xcode"),
+                                     Rule(path: "Library/Caches/org.swift.swiftpm", title: "Swift package cache", ecosystem: "Swift"),
+                                     Rule(path: ".npm/_cacache", title: "npm download cache", ecosystem: "Node.js"),
+                                     Rule(path: "Library/Caches/Yarn", title: "Yarn cache", ecosystem: "Node.js"),
+                                     Rule(path: "Library/pnpm/store", title: "pnpm store", ecosystem: "Node.js"),
+                                     Rule(path: "Library/Caches/pip", title: "pip download cache", ecosystem: "Python"),
+                                     Rule(path: "Library/Caches/uv", title: "uv cache", ecosystem: "Python"),
+                                     Rule(path: "Library/Caches/Homebrew", title: "Homebrew downloads", ecosystem: "Homebrew"),
+                                     Rule(path: ".gradle/caches", title: "Gradle cache", ecosystem: "Java / Kotlin"),
+                                     Rule(path: ".cargo/registry", title: "Cargo registry", ecosystem: "Rust"),
+                                     Rule(path: ".nvm/versions", title: "Node.js versions", ecosystem: "nvm", category: .tools),
+                                     Rule(path: ".pyenv/versions", title: "Python versions", ecosystem: "pyenv", category: .tools),
+                                     Rule(path: ".rustup/toolchains", title: "Rust toolchains", ecosystem: "Rust", category: .tools),
+                                     Rule(path: "Library/Python", title: "User Python packages", ecosystem: "Python", category: .tools),
+                                     Rule(path: ".local/pipx/venvs", title: "pipx environments", ecosystem: "Python", category: .tools),
+                                     Rule(path: "Library/Containers/com.docker.docker/Data/vms", title: "Docker virtual machines", ecosystem: "Docker", category: .tools, command: "docker system df -v"),
+                                     Rule(path: "Library/Application Support/com.apple.container", title: "Apple container storage", ecosystem: "Apple container", category: .tools, command: "container image list")]
+
+    /// The startup volume exposes Data through firmlinks. Skip its /System alias,
+    /// and scan mounted local volumes separately so each file tree is visited once.
+    private func shouldSkip(_ url: URL) -> Bool {
+        let path = url.path
+        let excluded = ["/System", "/dev", "/bin", "/sbin", "/Volumes", "/Network",
+                        "/private/var/db", "/private/var/vm", "/private/var/run", "/private/var/protected"]
+        if excluded.contains(path) { return true }
+        if path.hasPrefix("/usr/"), path != "/usr/local", !path.hasPrefix("/usr/local/") { return true }
+        return [".git", ".svn", ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd", "Backups.backupdb"].contains(url.lastPathComponent)
     }
 
-    private func hasNoSymlinks(_ url: URL, within root: URL) throws -> Bool {
-        var current = url
-        while current.path != root.path {
-            if try current.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true { return false }
-            let parent = current.deletingLastPathComponent()
-            guard parent.path != current.path else { return false }
-            current = parent
+    private func rule(for url: URL) -> Rule? {
+        if let rule = homeRules.first(where: { url.path.hasSuffix("/" + $0.path) }) { return rule }
+        switch url.path {
+        case "/opt/homebrew/Cellar", "/usr/local/Cellar":
+            return Rule(path: "", title: "Homebrew installations", ecosystem: "Homebrew", category: .tools)
+        case "/Library/Developer/CommandLineTools":
+            return Rule(path: "", title: "Apple command line tools", ecosystem: "Apple", category: .tools)
+        case "/Library/Frameworks/Python.framework":
+            return Rule(path: "", title: "Python framework", ecosystem: "Python", category: .tools)
+        default: return projectRule(url)
         }
-        return try root.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true
     }
 
-    private func scanProjects(_ root: URL, measured: inout Set<String>, report: inout ScanReport) throws {
-        guard try root.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { return }
-        // A selected dependency directory is itself a valid scan root.
-        if let rule = projectRule(root) {
-            try record(root, rule: rule, measured: &measured, report: &report)
-            return
-        }
+    private func scanTree(_ root: URL, measured: inout Set<String>, report: inout ScanReport,
+                          progress: @Sendable (ScanProgress) async -> Void) async throws
+    {
         var errors: [String] = []
-        guard let walker = manager.enumerator(at: root, includingPropertiesForKeys: Array(keys), options: [.skipsPackageDescendants], errorHandler: { url, error in
-            errors.append("\(url.path): \(error.localizedDescription)")
+        var errorCount = 0
+        var lastUpdate = ContinuousClock.now
+        let traversalKeys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
+        guard let walker = manager.enumerator(at: root, includingPropertiesForKeys: Array(traversalKeys), options: [.skipsPackageDescendants], errorHandler: { url, error in
+            errorCount += 1
+            if errors.count < 100 { errors.append("\(url.path): \(error.localizedDescription)") }
             return true
         }) else {
             report.issues.append("Could not enumerate \(root.path)")
+            report.inaccessibleLocations += 1
             return
         }
+        await progress(ScanProgress(path: root.path, directoriesVisited: report.directoriesVisited, findingsCount: report.findings.count))
         for case let url as URL in walker {
             try Task.checkCancellation()
             do {
-                let values = try url.resourceValues(forKeys: keys)
+                let values = try url.resourceValues(forKeys: traversalKeys)
                 if values.isSymbolicLink == true { walker.skipDescendants(); continue }
                 guard values.isDirectory == true else { continue }
-                if let rule = projectRule(url) {
+                if shouldSkip(url) { walker.skipDescendants(); continue }
+                report.directoriesVisited += 1
+                let rule = rule(for: url)
+                if rule != nil || lastUpdate.duration(to: .now) > .milliseconds(150) {
+                    await progress(ScanProgress(path: url.path, directoriesVisited: report.directoriesVisited, findingsCount: report.findings.count))
+                    lastUpdate = .now
+                }
+                if let rule {
                     walker.skipDescendants()
                     try record(url, rule: rule, measured: &measured, report: &report)
-                } else if [".git", ".svn", "Library", ".Trash"].contains(url.lastPathComponent) {
-                    walker.skipDescendants()
                 }
             } catch is CancellationError { throw CancellationError() }
-            catch { errors.append("\(url.path): \(error.localizedDescription)") }
+            catch {
+                errorCount += 1
+                if errors.count < 100 { errors.append("\(url.path): \(error.localizedDescription)") }
+            }
         }
         report.issues.append(contentsOf: errors)
+        report.inaccessibleLocations += errorCount
+        if errorCount > errors.count {
+            report.issues.append("\(errorCount - errors.count) additional access errors on \(root.path).")
+        }
     }
 
     private func projectRule(_ url: URL) -> Rule? {
@@ -157,7 +185,6 @@ actor StorageScanner {
         case ".venv", "venv": manager.fileExists(atPath: url.appendingPathComponent("pyvenv.cfg").path)
             ? Rule(path: "", title: "\(url.deletingLastPathComponent().lastPathComponent) virtual environment", ecosystem: "Python", category: .dependencies) : nil
         case ".terraform": Rule(path: "", title: "Terraform working data", ecosystem: "Terraform", category: .dependencies, command: "/bin/ls -lah \(Finding.quote(url.path))")
-        case "CommandLineTools": Rule(path: "", title: "Command line tools", ecosystem: "Apple", category: .tools)
         case ".build": manager.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("Package.swift").path)
             ? Rule(path: "", title: "Swift build output", ecosystem: "Swift") : nil
         case "target": manager.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("Cargo.toml").path)
@@ -179,7 +206,11 @@ actor StorageScanner {
         guard let walker = manager.enumerator(at: url, includingPropertiesForKeys: Array(sizeKeys), errorHandler: { _, _ in
             incomplete = true
             return true
-        }) else { report.issues.append("Could not measure \(path)"); return }
+        }) else {
+            report.inaccessibleLocations += 1
+            if report.issues.count < 200 { report.issues.append("Could not measure \(path)") }
+            return
+        }
         for case let child as URL in walker {
             try Task.checkCancellation()
             do {
@@ -192,7 +223,10 @@ actor StorageScanner {
                 bytes += Int64(values.fileAllocatedSize ?? values.fileSize ?? 0)
             } catch { incomplete = true }
         }
-        if incomplete { report.issues.append("Some files could not be measured in \(path). Size is a lower bound.") }
+        if incomplete {
+            report.inaccessibleLocations += 1
+            if report.issues.count < 200 { report.issues.append("Some files could not be measured in \(path). Size is a lower bound.") }
+        }
         let isTool = rule.category == .tools
         let isTerraform = rule.ecosystem == "Terraform"
         let explanation: LocalizedStringResource = isTool

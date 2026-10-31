@@ -5,8 +5,8 @@ A native SwiftUI developer storage audit for macOS. Scans are read-only. Cleanup
 ## Use
 
 1. Run the MacDevCleaner scheme in Xcode (macOS 27 or later).
-2. Add your home folder to scan known developer cache and tool locations. Add project folders to find dependencies and build output. Folder access is granted for the current app session.
-3. Scan folders (Command-R), search or filter the findings, and select an item for context.
+2. Click **Scan this Mac** (Command-R). No folders need to be selected. The app discovers supported developer storage across the startup disk and mounted local drives.
+3. Search or filter the findings and select an item for context. During scanning, the app shows the current path, folders visited, and findings discovered.
 4. Review the path, consequences, and command. Copy it or open the location in Finder. Ignore findings you want to keep; ignored paths persist locally.
 5. After performing cleanup yourself, scan again.
 
@@ -14,7 +14,8 @@ A native SwiftUI developer storage audit for macOS. Scans are read-only. Cleanup
 
 - Known home locations: Xcode Derived Data, SwiftPM, npm, Yarn, pnpm, pip, uv, Homebrew, Gradle, Cargo, nvm, pyenv, rustup, user Python packages, pipx, Docker VM storage, and Apple container storage.
 - Project trees: node_modules, Python environments with pyvenv.cfg, Swift .build next to Package.swift, Rust target next to Cargo.toml, and Terraform .terraform directories.
-- Select /Library/Developer/CommandLineTools as a project scan location to inspect Apple command line tools.
+- Shared installations: /Library/Developer/CommandLineTools, Homebrew Cellar directories, and /Library/Frameworks/Python.framework.
+- Network drives, hidden volumes, system trees, application bundles, backups, version-control internals, and symbolic links are excluded. /System/Volumes/Data is excluded to avoid scanning the startup disk twice through APFS firmlinks.
 
 Tool installations, container storage, and Terraform working directories receive inspection commands rather than recursive deletion commands. Other recognized generated directories receive interactive removal commands for their exact shell-quoted path. Commands do not use sudo or force flags, and deletion bypasses Trash.
 
@@ -24,7 +25,9 @@ This is a location-based audit, not a complete package-manager inventory or an u
 
 File allocation is measured without following symlinks. Overlapping findings are deduplicated, and hard links within a finding are counted once. APFS clones, shared files across findings, snapshots, and changes during a scan can affect totals and actual recovered space. Unreadable files produce scan notes and partial measurements. Directory modification times are context, not proof of inactivity.
 
-macOS can restrict access even after folder selection. Review scan notes rather than interpreting missing findings as proof that a tool has no data. Terraform state and container volumes must be reviewed and backed up using their owning tools.
+Automatic whole-Mac scanning uses a directly distributed build with App Sandbox disabled. Hardened Runtime remains enabled. This distribution configuration is not suitable for the Mac App Store, which requires App Sandbox.
+
+In an unrestricted build, macOS privacy protections and filesystem permissions still apply. Use **Scan access…** for Full Disk Access guidance and a list of unreadable locations, then relaunch and rescan after changing permissions. The app never grants itself Full Disk Access, requests administrator privileges, or changes permissions. At most 100 traversal error details per volume are retained, with total inaccessible counts reported separately. Review scan notes rather than interpreting missing findings as proof that a tool has no data. Terraform state and container volumes must be reviewed and backed up using their owning tools.
 
 The inspection commands follow the [Docker CLI reference](https://docs.docker.com/reference/cli/docker/system/df/) and [Apple container command reference](https://github.com/apple/container/blob/main/docs/command-reference.md). Installed versions may differ.
 

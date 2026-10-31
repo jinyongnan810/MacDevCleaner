@@ -48,15 +48,15 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            CleanerSidebar(model: model, filter: $filter)
+            CleanerSidebar(filter: $filter, showingAccess: $showingIssues)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 245, max: 300)
         } content: {
             VStack(spacing: 0) {
                 ScanOverview(findings: model.findings.filter { !model.ignored.contains($0.id) }, completedAt: model.completedAt)
                 Divider()
                 FindingsPanel(items: visibleFindings, selection: $selection, isScanning: model.isScanning,
-                              hasScanned: model.completedAt != nil, hasRoots: !model.roots.isEmpty, filter: filter ?? .all,
-                              addFolder: { model.chooseFolder(home: false) }, scan: model.scan)
+                              hasScanned: model.completedAt != nil, filter: filter ?? .all,
+                              progress: model.progress, scan: model.scan)
                     .frame(maxHeight: .infinity)
                 ScanFooter(model: model, showingIssues: $showingIssues)
             }
@@ -79,9 +79,8 @@ struct ContentView: View {
                 if model.isScanning {
                     Button("Cancel scan", systemImage: "stop.circle", action: model.cancel)
                 } else {
-                    Button("Scan folders", systemImage: "viewfinder", action: model.scan)
+                    Button("Scan this Mac", systemImage: "viewfinder", action: model.scan)
                         .buttonStyle(.borderedProminent)
-                        .disabled(model.roots.isEmpty)
                         .keyboardShortcut("r", modifiers: .command)
                 }
             }
@@ -89,14 +88,14 @@ struct ContentView: View {
         .onDisappear { model.cancel() }
         .tint(.teal)
         .sheet(isPresented: $showingIssues) {
-            ScanIssuesView(issues: model.issues)
+            ScanIssuesView(issues: model.issues, inaccessibleLocations: model.inaccessibleLocations, isSandboxedBuild: model.isSandboxedBuild, openSettings: model.openPrivacySettings)
         }
     }
 }
 
 private struct CleanerSidebar: View {
-    let model: CleanerModel
     @Binding var filter: ScanFilter?
+    @Binding var showingAccess: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -115,33 +114,12 @@ private struct CleanerSidebar: View {
                         Label(item.title, systemImage: item.symbol).tag(item)
                     }
                 }
-                Section("SCAN LOCATIONS") {
-                    ForEach(model.roots) { root in
-                        HStack {
-                            Image(systemName: root.isHome ? "house" : "folder")
-                                .foregroundStyle(.secondary)
-                            VStack(alignment: .leading) {
-                                Text(root.url.lastPathComponent).lineLimit(1)
-                                Text(root.isHome ? "Known tool locations" : "Projects & dependencies")
-                                    .font(.caption2).foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 0)
-                            Button {
-                                model.removeRoot(root)
-                            } label: {
-                                Image(systemName: "minus.circle").foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Remove scan location")
-                            .accessibilityLabel("Remove \(root.url.lastPathComponent)")
-                            .disabled(model.isScanning)
-                        }
-                        .help(root.url.path)
-                    }
-                    Button("Add home folder", systemImage: "house.badge.plus") { model.chooseFolder(home: true) }
-                    Button("Add project folder", systemImage: "folder.badge.plus") { model.chooseFolder(home: false) }
+                Section("SCAN SCOPE") {
+                    Label("This Mac", systemImage: "desktopcomputer")
+                    Text("Startup disk & local drives")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Scan access…", systemImage: "lock.shield") { showingAccess = true }
                 }
-                .disabled(model.isScanning)
             }
             .listStyle(.sidebar)
             VStack(alignment: .leading, spacing: 8) {
@@ -216,9 +194,8 @@ private struct FindingsPanel: View {
     @Binding var selection: String?
     let isScanning: Bool
     let hasScanned: Bool
-    let hasRoots: Bool
     let filter: ScanFilter
-    let addFolder: () -> Void
+    let progress: ScanProgress
     let scan: () -> Void
 
     var body: some View {
@@ -232,19 +209,21 @@ private struct FindingsPanel: View {
             if isScanning {
                 VStack(spacing: 16) {
                     ProgressView()
-                    Text("Measuring your selected folders…").font(.headline)
+                    Text("Scanning this Mac…").font(.headline)
+                    Text("\(progress.directoriesVisited.formatted()) folders checked · \(progress.findingsCount.formatted()) findings")
+                        .font(.subheadline).monospacedDigit()
+                    Text(progress.path).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        .lineLimit(2).truncationMode(.middle).padding(.horizontal, 24)
                     Text("Large dependency trees can take a moment.").foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if items.isEmpty {
                 ContentUnavailableView {
-                    Label(hasScanned ? "Nothing here" : "Start with your dev folders", systemImage: hasScanned ? "checkmark.circle" : "folder.badge.plus")
+                    Label(hasScanned ? "Nothing here" : "Make room for your next project", systemImage: hasScanned ? "checkmark.circle" : "desktopcomputer")
                 } description: {
-                    Text(hasScanned ? "No matching findings. Try another category or add more scan locations. Check scan notes for access limitations." : "Add a home folder for known caches, or a project folder for dependencies and build output.")
+                    Text(hasScanned ? "No matching findings. Try another category or check scan access for coverage limitations." : "Find developer caches, dependencies, and tools across this Mac. No folders to choose. You decide what to clean.")
                 } actions: {
-                    if hasRoots, !hasScanned {
-                        Button("Scan selected folders", action: scan).buttonStyle(.borderedProminent)
-                    }
-                    Button("Add project folder", action: addFolder)
+                    Button(hasScanned ? "Scan again" : "Scan this Mac", systemImage: "viewfinder", action: scan)
+                        .buttonStyle(.borderedProminent).controlSize(.large)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -284,14 +263,23 @@ private struct ScanFooter: View {
     @Binding var showingIssues: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if model.isSandboxedBuild {
+                Button { showingIssues = true } label: {
+                    Label("This build has limited scan access", systemImage: "lock.shield")
+                }.buttonStyle(.plain).foregroundStyle(.orange)
+            }
             if !model.issues.isEmpty {
                 Button { showingIssues = true } label: {
-                    Label("\(model.issues.count) scan notes — review access limitations", systemImage: "exclamationmark.circle")
+                    Label("\(model.inaccessibleLocations.formatted()) locations couldn’t be read — review access", systemImage: "exclamationmark.circle")
                 }.buttonStyle(.plain).foregroundStyle(.orange)
             }
             Text(model.status).font(.caption).foregroundStyle(.secondary)
             if let date = model.completedAt {
-                Text(date, format: .dateTime.hour().minute()).font(.caption2).foregroundStyle(.tertiary)
+                HStack {
+                    Text("Last completed scan")
+                    Text(date, format: .dateTime.hour().minute())
+                    Text("· \(model.volumesScanned) local volumes")
+                }.font(.caption2).foregroundStyle(.tertiary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(14)
@@ -379,17 +367,33 @@ private struct CommandCard: View {
 
 private struct ScanIssuesView: View {
     let issues: [String]
+    let inaccessibleLocations: Int
+    let isSandboxedBuild: Bool
+    let openSettings: () -> Void
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Scan notes").font(.title2.bold())
-            Text("Inaccessible files are excluded from totals. You can select a location again to grant access; macOS privacy restrictions may still apply.")
+            Label("Scan access & coverage", systemImage: "lock.shield").font(.title2.bold())
+            Text("The scan searches the startup disk and mounted local drives for supported developer storage. System directories, app bundles, backups, network drives, and symbolic links are skipped.")
                 .foregroundStyle(.secondary)
+            if isSandboxedBuild {
+                Label("This build uses App Sandbox", systemImage: "exclamationmark.shield").font(.headline)
+                Text("Automatic whole-Mac coverage requires a build without App Sandbox. Full Disk Access does not remove the sandbox restriction.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+            Text("For broader access, open System Settings → Privacy & Security → Full Disk Access and enable MacDevCleaner. Relaunch the app, then scan again. macOS permissions can still prevent reading some locations.")
+                .font(.subheadline)
+            Button("Open System Settings", systemImage: "gear", action: openSettings)
+            Divider()
+            Text("\(inaccessibleLocations.formatted()) locations could not be read in the last completed scan.")
+                .font(.headline)
+            Text("Unreadable files are excluded from totals. Notes below include measurement limitations; at most 100 traversal errors per volume are listed.")
+                .font(.caption).foregroundStyle(.secondary)
             List(issues, id: \.self) { issue in
                 Text(issue).font(.caption.monospaced()).textSelection(.enabled)
             }
             Button("Done") { dismiss() }.keyboardShortcut(.defaultAction).frame(maxWidth: .infinity, alignment: .trailing)
-        }.padding(24).frame(width: 650, height: 440)
+        }.padding(24).frame(width: 680, height: 650)
     }
 }
 
