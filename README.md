@@ -34,3 +34,7 @@ The inspection commands follow the [Docker CLI reference](https://docs.docker.co
 ## Development
 
 Run `make lint` after Swift changes. Build using Xcode MCP BuildProject. Do not run test suites unless explicitly requested (see AGENTS.md).
+
+## Direct distribution
+
+Distribute a Developer ID–signed, notarized DMG. See [the release guide](docs/distribution.md) for certificate setup, Xcode archive/export, `make dmg`, notarization, and installation verification. Packaging takes an exported app and does not build or modify its signature.
