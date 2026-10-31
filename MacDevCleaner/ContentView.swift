@@ -66,7 +66,8 @@ struct ContentView: View {
             .searchable(text: $search, prompt: "Find a tool, project, or path")
         } detail: {
             if let item = visibleFindings.first(where: { $0.id == selection }) {
-                FindingInspector(item: item, ignored: model.ignored.contains(item.id), toggleIgnored: { model.toggleIgnored(item) })
+                FindingInspector(item: item, ignored: model.ignored.contains(item.id), isBusy: model.isBusy,
+                                 toggleIgnored: { model.toggleIgnored(item) }, commandCopied: model.commandCopied, refresh: model.refreshResults)
             } else {
                 ContentUnavailableView("A little context before cleanup", systemImage: "terminal",
                                        description: Text("Select a finding to see what it is, what removal means, and a command you can review."))
@@ -75,9 +76,15 @@ struct ContentView: View {
         .navigationSplitViewStyle(.balanced)
         .navigationTitle("Storage audit")
         .toolbar {
+            ToolbarItem {
+                Button("Refresh results", systemImage: "arrow.clockwise", action: model.refreshResults)
+                    .disabled(model.isBusy || model.findings.isEmpty)
+                    .help("Recheck existing findings after running cleanup commands")
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+            }
             ToolbarItem(placement: .primaryAction) {
-                if model.isScanning {
-                    Button("Cancel scan", systemImage: "stop.circle", action: model.cancel)
+                if model.isBusy {
+                    Button("Cancel", systemImage: "stop.circle", action: model.cancel)
                 } else {
                     Button("Scan this Mac", systemImage: "viewfinder", action: model.scan)
                         .buttonStyle(.borderedProminent)
@@ -85,10 +92,21 @@ struct ContentView: View {
                 }
             }
         }
+        .modifier(RefreshOnReturn(model: model))
         .onDisappear { model.cancel() }
         .tint(.teal)
         .sheet(isPresented: $showingIssues) {
-            ScanIssuesView(issues: model.issues, inaccessibleLocations: model.inaccessibleLocations, isSandboxedBuild: model.isSandboxedBuild, openSettings: model.openPrivacySettings)
+            ScanIssuesView(issues: model.allIssues, inaccessibleLocations: model.totalInaccessibleLocations, isSandboxedBuild: model.isSandboxedBuild, openSettings: model.openPrivacySettings)
+        }
+    }
+}
+
+private struct RefreshOnReturn: ViewModifier {
+    let model: CleanerModel
+
+    func body(content: Content) -> some View {
+        content.onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshAfterReturning()
         }
     }
 }
@@ -251,7 +269,7 @@ private struct FindingRow: View {
             Spacer(minLength: 4)
             VStack(alignment: .trailing, spacing: 5) {
                 Text(item.displaySize).font(.subheadline.weight(.semibold)).monospacedDigit()
-                Text(item.incomplete ? "Partial size" : item.inspectionCommand != nil ? "Review usage" : "Regenerable")
+                Text(item.measurementIsStale ? "Needs recheck" : item.incomplete ? "Partial size" : item.inspectionCommand != nil ? "Review usage" : "Regenerable")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }.padding(.vertical, 8)
@@ -268,12 +286,21 @@ private struct ScanFooter: View {
                     Label("This build has limited scan access", systemImage: "lock.shield")
                 }.buttonStyle(.plain).foregroundStyle(.orange)
             }
-            if !model.issues.isEmpty {
+            if !model.allIssues.isEmpty {
                 Button { showingIssues = true } label: {
-                    Label("\(model.inaccessibleLocations.formatted()) locations couldn’t be read — review access", systemImage: "exclamationmark.circle")
+                    Label("\(model.totalInaccessibleLocations.formatted()) locations couldn’t be read — review access", systemImage: "exclamationmark.circle")
                 }.buttonStyle(.plain).foregroundStyle(.orange)
             }
-            Text(model.status).font(.caption).foregroundStyle(.secondary)
+            HStack {
+                if model.isRefreshing { ProgressView().controlSize(.small) }
+                Text(model.status).font(.caption).foregroundStyle(.secondary)
+            }
+            if let date = model.refreshedAt {
+                HStack {
+                    Text("Results refreshed")
+                    Text(date, format: .dateTime.hour().minute())
+                }.font(.caption2).foregroundStyle(.secondary)
+            }
             if let date = model.completedAt {
                 HStack {
                     Text("Last completed scan")
@@ -290,7 +317,10 @@ private struct ScanFooter: View {
 private struct FindingInspector: View {
     let item: Finding
     let ignored: Bool
+    let isBusy: Bool
     let toggleIgnored: () -> Void
+    let commandCopied: () -> Void
+    let refresh: () -> Void
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
@@ -299,7 +329,7 @@ private struct FindingInspector: View {
                     Text(item.ecosystem).font(.subheadline).foregroundStyle(.secondary)
                     Text(item.title).font(.title.weight(.semibold))
                     Text(item.displaySize).font(.system(.title, design: .rounded, weight: .medium)).monospacedDigit()
-                    Label(item.incomplete ? "Partial measurement" : "Measured on disk", systemImage: "internaldrive")
+                    Label(item.measurementIsStale ? "Previous measurement — recheck needed" : item.incomplete ? "Partial measurement" : "Measured on disk", systemImage: "internaldrive")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 DetailSection(title: "What you’re looking at", text: item.explanation)
@@ -316,11 +346,17 @@ private struct FindingInspector: View {
                         NSWorkspace.shared.activateFileViewerSelecting([item.url])
                     }
                 }
-                CommandCard(command: item.command, isInspection: item.inspectionCommand != nil)
-                    .id(item.id)
+                if item.measurementIsStale {
+                    DetailSection(title: "Location couldn’t be rechecked", text: "The previous size is shown. Reconnect the drive or restore access, then refresh. Cleanup commands are hidden until the location can be checked again.")
+                } else {
+                    CommandCard(command: item.command, isInspection: item.inspectionCommand != nil, onCopy: commandCopied)
+                        .id(item.id)
+                }
+                Button("Refresh results", systemImage: "arrow.clockwise", action: refresh)
+                    .disabled(isBusy)
                 Button(ignored ? "Restore finding" : "Ignore this finding", systemImage: ignored ? "eye" : "eye.slash", action: toggleIgnored)
                     .frame(maxWidth: .infinity)
-                Text("After running a command yourself, scan again to refresh these results.")
+                Text("After copying a command, results refresh when you return to the app. You can also use Refresh results at any time. A whole-Mac scan discovers new locations.")
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(28)
         }
@@ -343,6 +379,7 @@ private struct DetailSection: View {
 private struct CommandCard: View {
     let command: String
     let isInspection: Bool
+    let onCopy: () -> Void
     @State private var copied = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -351,11 +388,12 @@ private struct CommandCard: View {
             Text(command).font(.callout.monospaced()).textSelection(.enabled)
                 .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                 .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
-            Text(isInspection ? "This command lists information. Use the owning tool to choose what to remove." : "Interactive removal asks before deleting files. Review the exact path and back up local changes. Deletion bypasses Trash.")
+            Text(isInspection ? "This command lists information. Use the owning tool to choose what to remove." : "Recursively deletes this directory without confirmation and bypasses Trash. Review the exact path and back up local changes before running.")
                 .font(.caption).foregroundStyle(.secondary)
             Button(copied ? "Copied" : "Copy command", systemImage: copied ? "checkmark" : "doc.on.doc") {
                 NSPasteboard.general.clearContents()
                 copied = NSPasteboard.general.setString(command, forType: .string)
+                if copied { onCopy() }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -385,7 +423,7 @@ private struct ScanIssuesView: View {
                 .font(.subheadline)
             Button("Open System Settings", systemImage: "gear", action: openSettings)
             Divider()
-            Text("\(inaccessibleLocations.formatted()) locations could not be read in the last completed scan.")
+            Text("\(inaccessibleLocations.formatted()) locations could not be read in the latest scan or refresh.")
                 .font(.headline)
             Text("Unreadable files are excluded from totals. Notes below include measurement limitations; at most 100 traversal errors per volume are listed.")
                 .font(.caption).foregroundStyle(.secondary)

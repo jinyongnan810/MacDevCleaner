@@ -8,7 +8,7 @@ A native SwiftUI developer storage audit for macOS. Scans are read-only. Cleanup
 2. Click **Scan this Mac** (Command-R). No folders need to be selected. The app discovers supported developer storage across the startup disk and mounted local drives.
 3. Search or filter the findings and select an item for context. During scanning, the app shows the current path, folders visited, and findings discovered.
 4. Review the path, consequences, and command. Copy it or open the location in Finder. Ignore findings you want to keep; ignored paths persist locally.
-5. After performing cleanup yourself, scan again.
+5. After running a copied command, return to the app to automatically refresh existing findings, or click **Refresh results** (Command-Shift-R). Deleted directories disappear and remaining directories are remeasured. Use a whole-Mac scan to discover new locations. The app cannot know whether a command ran in Terminal; it verifies the filesystem instead. Inaccessible or unavailable locations retain their previous size, are marked for rechecking, and have cleanup commands hidden.
 
 ## Coverage
 
@@ -17,7 +17,7 @@ A native SwiftUI developer storage audit for macOS. Scans are read-only. Cleanup
 - Shared installations: /Library/Developer/CommandLineTools, Homebrew Cellar directories, and /Library/Frameworks/Python.framework.
 - Network drives, hidden volumes, system trees, application bundles, backups, version-control internals, and symbolic links are excluded. /System/Volumes/Data is excluded to avoid scanning the startup disk twice through APFS firmlinks.
 
-Tool installations, container storage, and Terraform working directories receive inspection commands rather than recursive deletion commands. Other recognized generated directories receive interactive removal commands for their exact shell-quoted path. Commands do not use sudo or force flags, and deletion bypasses Trash.
+Tool installations, container storage, and Terraform working directories receive inspection commands rather than recursive deletion commands. Other recognized generated directories receive `/bin/rm -rf --` commands for their exact shell-quoted path. Removal is recursive, skips confirmation, and bypasses Trash. The app only copies commands; it does not run them or use sudo.
 
 ## Limits
 

@@ -30,9 +30,11 @@ nonisolated struct Finding: Identifiable, Sendable {
     let explanation: LocalizedStringResource
     let consequence: LocalizedStringResource
     let inspectionCommand: String?
-    let incomplete: Bool
+    var incomplete: Bool
+    var measurementIsStale = false
+    var volumeURL: URL?
     var id: String { url.path }
-    var command: String { inspectionCommand ?? "/bin/rm -ri -- \(Self.quote(url.path))" }
+    var command: String { inspectionCommand ?? "/bin/rm -rf -- \(Self.quote(url.path))" }
     static func quote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
     var displaySize: String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
 }
@@ -88,6 +90,54 @@ actor StorageScanner {
         }
         report.findings.sort { $0.bytes > $1.bytes }
         return report
+    }
+
+    /// Recheck only known findings after cleanup; no whole-disk discovery is needed.
+    func refresh(_ findings: [Finding]) throws -> ScanReport {
+        var report = ScanReport()
+        var measured: Set<String> = []
+        for finding in findings {
+            try Task.checkCancellation()
+            do {
+                // Enumerator URLs retain resource-value caches. Build a fresh URL so
+                // refresh observes external deletion, replacement, and size changes.
+                let location = URL(fileURLWithPath: finding.url.path, isDirectory: true)
+                var current = location
+                while current.path != "/" {
+                    let values = try current.resourceValues(forKeys: [.isSymbolicLinkKey])
+                    if values.isSymbolicLink == true {
+                        throw CocoaError(.fileReadInvalidFileName)
+                    }
+                    current = current.deletingLastPathComponent()
+                }
+                let values = try location.resourceValues(forKeys: [.isDirectoryKey])
+                guard values.isDirectory == true else { throw CocoaError(.fileReadUnknown) }
+                let rule = Rule(path: "", title: finding.title, ecosystem: finding.ecosystem,
+                                category: finding.category, command: finding.inspectionCommand)
+                let count = report.findings.count
+                try record(location, rule: rule, measured: &measured, report: &report)
+                if report.findings.count == count { retainStale(finding, in: &report) }
+            } catch is CancellationError { throw CancellationError() }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                // An unmounted or unreadable drive does not prove cleanup succeeded.
+                if let volume = finding.volumeURL, manager.isReadableFile(atPath: volume.path) {
+                    continue
+                }
+                retainStale(finding, in: &report)
+            } catch {
+                retainStale(finding, in: &report)
+            }
+        }
+        report.findings.sort { $0.bytes > $1.bytes }
+        return report
+    }
+
+    private func retainStale(_ finding: Finding, in report: inout ScanReport) {
+        var previous = finding
+        previous.measurementIsStale = true
+        report.findings.append(previous)
+        report.inaccessibleLocations += 1
+        report.issues.append("Could not recheck \(finding.url.path). The previous size is retained; the location may be inaccessible, changed, or on an unavailable drive.")
     }
 
     private let homeRules: [Rule] = [Rule(path: "Library/Developer/Xcode/DerivedData", title: "Xcode Derived Data", ecosystem: "Xcode"),
@@ -242,6 +292,7 @@ actor StorageScanner {
         let command = rule.command ?? (isTool ? "/bin/ls -lah \(Finding.quote(path))" : nil)
         report.findings.append(Finding(url: url, title: rule.title, ecosystem: rule.ecosystem, category: rule.category, bytes: bytes,
                                        modified: try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
-                                       explanation: explanation, consequence: consequence, inspectionCommand: command, incomplete: incomplete))
+                                       explanation: explanation, consequence: consequence, inspectionCommand: command, incomplete: incomplete,
+                                       volumeURL: try? url.resourceValues(forKeys: [.volumeURLKey]).volume))
     }
 }
