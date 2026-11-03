@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 private enum ScanFilter: String, CaseIterable, Identifiable {
-    case all, caches, dependencies, tools, vms, ignored
+    case all, caches, dependencies, tools, vms, apps, ignored
     var id: String { rawValue }
     var title: LocalizedStringResource {
         switch self {
@@ -11,6 +11,7 @@ private enum ScanFilter: String, CaseIterable, Identifiable {
         case .dependencies: "Project dependencies"
         case .tools: "CLIs & runtimes"
         case .vms: "VMs & models"
+        case .apps: "Apps & support"
         case .ignored: "Ignored"
         }
     }
@@ -22,6 +23,7 @@ private enum ScanFilter: String, CaseIterable, Identifiable {
         case .dependencies: "folder.badge.gearshape"
         case .tools: "terminal"
         case .vms: "desktopcomputer"
+        case .apps: "app.badge"
         case .ignored: "eye.slash"
         }
     }
@@ -44,6 +46,7 @@ struct ContentView: View {
             case .dependencies: !ignored && item.category == .dependencies
             case .tools: !ignored && item.category == .tools
             case .vms: !ignored && item.category == .vms
+            case .apps: !ignored && item.category == .apps
             }
             return matches && (search.isEmpty || "\(item.title) \(item.groupTitle ?? "") \(item.ecosystem) \(item.id)".localizedCaseInsensitiveContains(search))
         }
@@ -314,7 +317,8 @@ private struct FindingDisplayRow: View {
                 }
             case let .group(group):
                 let checkedCount = group.items.filter { selectedIDs.contains($0.id) }.count
-                Image(systemName: "checklist")
+                let isAppGroup = group.category == .apps
+                Image(systemName: isAppGroup ? "app.badge" : "checklist")
                     .font(.title3).foregroundStyle(.teal)
                     .frame(width: 38, height: 42)
                     .background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
@@ -328,13 +332,13 @@ private struct FindingDisplayRow: View {
                     }
                     Text("\(group.ecosystem) · \(checkedCount) of \(group.items.count) selected")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("Grouped folders — select to choose which projects to delete")
+                    Text(isAppGroup ? "App bundle & support folders — choose what to remove" : "Grouped folders — select to choose which projects to delete")
                         .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 VStack(alignment: .trailing, spacing: 5) {
                     Text(group.displaySize).font(.subheadline.weight(.semibold)).monospacedDigit()
-                    Text("Batch select")
+                    Text(isAppGroup ? "App + support" : "Batch select")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
@@ -449,8 +453,9 @@ private struct GroupInspector: View {
     }
 
     private var combinedCommand: String {
+        let needsSudo = selectedItems.contains { $0.url.path.hasPrefix("/Applications/") || $0.url.path.hasPrefix("/Library/") }
         let paths = selectedItems.map { Finding.quote($0.url.path) }.joined(separator: " ")
-        return "/bin/rm -rf -- \(paths)"
+        return "\(needsSudo ? "sudo " : "")/bin/rm -rf -- \(paths)"
     }
 
     var body: some View {

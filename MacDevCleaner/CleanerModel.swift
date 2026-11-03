@@ -65,7 +65,12 @@ final class CleanerModel {
                     try FileManager.default.removeItem(at: item.url)
                     selectedGroupItemIDs.remove(item.id)
                 } catch {
-                    deleteErrors.append("\(item.url.path): \(error.localizedDescription)")
+                    do {
+                        try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
+                        selectedGroupItemIDs.remove(item.id)
+                    } catch {
+                        deleteErrors.append("\(item.url.path): \(error.localizedDescription)")
+                    }
                 }
             }
             do {

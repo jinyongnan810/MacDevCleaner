@@ -1,7 +1,7 @@
 import Foundation
 
 nonisolated enum FindingCategory: String, CaseIterable, Identifiable, Sendable {
-    case caches, dependencies, tools, vms
+    case caches, dependencies, tools, vms, apps
     var id: String { rawValue }
     var title: LocalizedStringResource {
         switch self {
@@ -9,6 +9,7 @@ nonisolated enum FindingCategory: String, CaseIterable, Identifiable, Sendable {
         case .dependencies: "Project dependencies"
         case .tools: "CLIs & runtimes"
         case .vms: "VMs & models"
+        case .apps: "Apps & support"
         }
     }
 
@@ -18,6 +19,7 @@ nonisolated enum FindingCategory: String, CaseIterable, Identifiable, Sendable {
         case .dependencies: "folder.badge.gearshape"
         case .tools: "terminal"
         case .vms: "desktopcomputer"
+        case .apps: "app.badge"
         }
     }
 }
@@ -227,6 +229,7 @@ actor StorageScanner {
         if let cli = cliRule(for: url) { return cli }
         if let lang = languageVersionRule(for: url) { return lang }
         if let vm = vmAndModelRule(for: url) { return vm }
+        if let appSupport = appSupportRule(for: url) { return appSupport }
         switch url.path {
         case "/Library/Developer/CommandLineTools":
             return Rule(path: "", title: "Apple Command Line Tools", ecosystem: "Apple CLI", category: .tools,
@@ -235,6 +238,27 @@ actor StorageScanner {
                         consequence: "Uninstalling removes command-line compilers and SDKs outside Xcode. Run xcode-select --install to reinstall if needed.")
         default: return projectRule(url)
         }
+    }
+
+    private func appSupportRule(for url: URL) -> Rule? {
+        let name = url.lastPathComponent
+        let parentPath = url.deletingLastPathComponent().path
+        guard parentPath.hasSuffix("/Library/Application Support"), !name.hasPrefix(".") else { return nil }
+        let skippedSupportDirs: Set<String> = [
+            "Apple", "AddressBook", "CallHistoryDB", "CallHistoryTransactions",
+            "CloudDocs", "CrashReporter", "DifferentialPrivacy", "DiskImages",
+            "Dock", "FileProvider", "icdd", "Knowledge", "MobileSync",
+            "SyncServices", "fnm", "mise", "uv", "Jan", "nomic.ai",
+        ]
+        if name.hasPrefix("com.apple.") || skippedSupportDirs.contains(name) { return nil }
+        let needsSudo = url.path.hasPrefix("/Library/")
+        return Rule(path: "",
+                    title: "\(name) (Application Support)",
+                    ecosystem: "Application Support",
+                    category: .apps,
+                    uninstallCommand: "\(needsSudo ? "sudo " : "")/bin/rm -rf -- \(Finding.quote(url.path))",
+                    explanation: "Application Support data, extensions, or local databases stored by \(name).",
+                    consequence: "If \(name) is still installed, deleting this resets its local settings and data. If the app was already removed, this leftover support folder can be deleted.")
     }
 
     private func parseSimulatorRuntime(_ runtime: String?) -> (platform: String, label: String) {
@@ -773,6 +797,13 @@ actor StorageScanner {
                     lastUpdate = .now
                     continue
                 }
+                if isApplicationBundle(url) {
+                    walker.skipDescendants()
+                    try recordApplicationBundle(url, root: root, measured: &measured, report: &report)
+                    await progress(ScanProgress(path: url.path, directoriesVisited: report.directoriesVisited, findingsCount: report.findings.count))
+                    lastUpdate = .now
+                    continue
+                }
                 let rule = rule(for: url)
                 if rule != nil || lastUpdate.duration(to: .now) > .milliseconds(150) {
                     await progress(ScanProgress(path: url.path, directoriesVisited: report.directoriesVisited, findingsCount: report.findings.count))
@@ -888,6 +919,119 @@ actor StorageScanner {
                                        uninstallCommand: rule.uninstallCommand, inspectionCommand: command,
                                        groupKey: rule.groupKey, groupTitle: rule.groupTitle, incomplete: incomplete,
                                        volumeURL: try? url.resourceValues(forKeys: [.volumeURLKey]).volume))
+    }
+
+    private func isApplicationBundle(_ url: URL) -> Bool {
+        guard url.pathExtension.lowercased() == "app", !url.path.hasPrefix("/System/") else { return false }
+        let parentPath = url.deletingLastPathComponent().path
+        return parentPath == "/Applications" || parentPath.hasSuffix("/Applications")
+    }
+
+    private func recordApplicationBundle(_ appURL: URL, root: URL, measured: inout Set<String>, report: inout ScanReport) throws {
+        let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
+        let plist = NSDictionary(contentsOf: infoURL) as? [String: Any]
+        let bundleID = (plist?["CFBundleIdentifier"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folderAppName = appURL.deletingPathExtension().lastPathComponent
+        let displayName = (plist?["CFBundleDisplayName"] as? String) ?? (plist?["CFBundleName"] as? String)
+        let appName = (displayName?.isEmpty == false) ? displayName! : folderAppName
+        let groupKey = "app:\(bundleID ?? appURL.standardizedFileURL.path)"
+        let groupTitle = "\(appName)"
+        let needsSudo = appURL.path.hasPrefix("/Applications/")
+        let explanation: LocalizedStringResource = "Application bundle (\(folderAppName).app) grouped with its Application Support, Caches, Containers, and Saved State folders."
+        let consequence: LocalizedStringResource = "Check both the .app bundle and support folders to completely uninstall \(appName), or uncheck the .app bundle to clear only its support and cache folders."
+
+        let appRule = Rule(path: "",
+                           title: "\(folderAppName).app (Application)",
+                           ecosystem: "Application & Support",
+                           category: .apps,
+                           uninstallCommand: "\(needsSudo ? "sudo " : "")/bin/rm -rf -- \(Finding.quote(appURL.path))",
+                           groupKey: groupKey,
+                           groupTitle: groupTitle,
+                           explanation: explanation,
+                           consequence: consequence)
+        try record(appURL, rule: appRule, measured: &measured, report: &report)
+
+        var userHomes: [URL] = [manager.homeDirectoryForCurrentUser]
+        let usersDir = root.path == "/" ? URL(fileURLWithPath: "/Users", isDirectory: true) : root.appendingPathComponent("Users", isDirectory: true)
+        if let entries = try? manager.contentsOfDirectory(at: usersDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            for entry in entries where entry.lastPathComponent != "Shared" {
+                if !userHomes.contains(where: { $0.standardizedFileURL.path == entry.standardizedFileURL.path }) {
+                    userHomes.append(entry)
+                }
+            }
+        }
+
+        var candidates: [(url: URL, label: String)] = []
+        let sysLib = root.path == "/" ? URL(fileURLWithPath: "/Library", isDirectory: true) : root.appendingPathComponent("Library", isDirectory: true)
+        candidates.append((sysLib.appendingPathComponent("Application Support/\(folderAppName)", isDirectory: true), "System Application Support"))
+        if let bundleID, !bundleID.isEmpty {
+            candidates.append((sysLib.appendingPathComponent("Application Support/\(bundleID)", isDirectory: true), "System Application Support"))
+        }
+
+        for home in userHomes {
+            let lib = home.appendingPathComponent("Library", isDirectory: true)
+            candidates.append((lib.appendingPathComponent("Application Support/\(folderAppName)", isDirectory: true), "Application Support"))
+            if appName != folderAppName {
+                candidates.append((lib.appendingPathComponent("Application Support/\(appName)", isDirectory: true), "Application Support"))
+            }
+            candidates.append((lib.appendingPathComponent("Caches/\(folderAppName)", isDirectory: true), "Cache"))
+            candidates.append((lib.appendingPathComponent("Logs/\(folderAppName)", isDirectory: true), "Logs"))
+            if let bundleID, !bundleID.isEmpty {
+                candidates.append((lib.appendingPathComponent("Application Support/\(bundleID)", isDirectory: true), "Application Support"))
+                if bundleID == "com.microsoft.VSCode" {
+                    candidates.append((lib.appendingPathComponent("Application Support/Code", isDirectory: true), "Application Support"))
+                } else if bundleID == "com.google.Chrome" {
+                    candidates.append((lib.appendingPathComponent("Application Support/Google/Chrome", isDirectory: true), "Application Support"))
+                }
+                candidates.append((lib.appendingPathComponent("Caches/\(bundleID)", isDirectory: true), "Cache"))
+                candidates.append((lib.appendingPathComponent("Containers/\(bundleID)", isDirectory: true), "Sandbox Container"))
+                candidates.append((lib.appendingPathComponent("Saved Application State/\(bundleID).savedState", isDirectory: true), "Saved State"))
+                candidates.append((lib.appendingPathComponent("HTTPStorages/\(bundleID)", isDirectory: true), "HTTP Storage"))
+                candidates.append((lib.appendingPathComponent("WebKit/\(bundleID)", isDirectory: true), "WebKit Data"))
+                candidates.append((lib.appendingPathComponent("Logs/\(bundleID)", isDirectory: true), "Logs"))
+            }
+        }
+
+        var seenPaths: Set<String> = []
+        for candidate in candidates {
+            let stdPath = candidate.url.standardizedFileURL.path
+            guard seenPaths.insert(stdPath).inserted else { continue }
+            guard let values = try? candidate.url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true, values.isSymbolicLink != true
+            else { continue }
+
+            let supportTitle = "\(appName) — \(candidate.label)"
+            if let existingIndex = report.findings.firstIndex(where: { $0.id == stdPath }) {
+                let old = report.findings[existingIndex]
+                report.findings[existingIndex] = Finding(url: old.url,
+                                                         title: supportTitle,
+                                                         ecosystem: "Application & Support",
+                                                         category: .apps,
+                                                         bytes: old.bytes,
+                                                         modified: old.modified,
+                                                         explanation: explanation,
+                                                         consequence: consequence,
+                                                         uninstallCommand: old.uninstallCommand,
+                                                         inspectionCommand: nil,
+                                                         groupKey: groupKey,
+                                                         groupTitle: groupTitle,
+                                                         incomplete: old.incomplete,
+                                                         measurementIsStale: old.measurementIsStale,
+                                                         volumeURL: old.volumeURL)
+            } else {
+                let supportNeedsSudo = stdPath.hasPrefix("/Library/")
+                let supportRule = Rule(path: "",
+                                       title: supportTitle,
+                                       ecosystem: "Application & Support",
+                                       category: .apps,
+                                       uninstallCommand: "\(supportNeedsSudo ? "sudo " : "")/bin/rm -rf -- \(Finding.quote(stdPath))",
+                                       groupKey: groupKey,
+                                       groupTitle: groupTitle,
+                                       explanation: explanation,
+                                       consequence: consequence)
+                try record(candidate.url, rule: supportRule, measured: &measured, report: &report)
+            }
+        }
     }
 
     private func recordOllamaModels(at modelsDir: URL, measured: inout Set<String>, report: inout ScanReport) throws {
