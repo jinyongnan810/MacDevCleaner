@@ -2,14 +2,15 @@ import AppKit
 import SwiftUI
 
 private enum ScanFilter: String, CaseIterable, Identifiable {
-    case all, caches, dependencies, tools, ignored
+    case all, caches, dependencies, tools, vms, ignored
     var id: String { rawValue }
     var title: LocalizedStringResource {
         switch self {
         case .all: "All findings"
         case .caches: "Caches & builds"
         case .dependencies: "Project dependencies"
-        case .tools: "Tools & containers"
+        case .tools: "CLIs & runtimes"
+        case .vms: "VMs & models"
         case .ignored: "Ignored"
         }
     }
@@ -20,6 +21,7 @@ private enum ScanFilter: String, CaseIterable, Identifiable {
         case .caches: "shippingbox"
         case .dependencies: "folder.badge.gearshape"
         case .tools: "terminal"
+        case .vms: "desktopcomputer"
         case .ignored: "eye.slash"
         }
     }
@@ -41,6 +43,7 @@ struct ContentView: View {
             case .caches: !ignored && item.category == .caches
             case .dependencies: !ignored && item.category == .dependencies
             case .tools: !ignored && item.category == .tools
+            case .vms: !ignored && item.category == .vms
             }
             return matches && (search.isEmpty || "\(item.title) \(item.ecosystem) \(item.id)".localizedCaseInsensitiveContains(search))
         }

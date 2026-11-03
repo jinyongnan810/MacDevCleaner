@@ -1,13 +1,14 @@
 import Foundation
 
 nonisolated enum FindingCategory: String, CaseIterable, Identifiable, Sendable {
-    case caches, dependencies, tools
+    case caches, dependencies, tools, vms
     var id: String { rawValue }
     var title: LocalizedStringResource {
         switch self {
         case .caches: "Caches & builds"
         case .dependencies: "Project dependencies"
-        case .tools: "Tools & containers"
+        case .tools: "CLIs & runtimes"
+        case .vms: "VMs & models"
         }
     }
 
@@ -16,6 +17,7 @@ nonisolated enum FindingCategory: String, CaseIterable, Identifiable, Sendable {
         case .caches: "shippingbox"
         case .dependencies: "folder.badge.gearshape"
         case .tools: "terminal"
+        case .vms: "desktopcomputer"
         }
     }
 }
@@ -114,7 +116,15 @@ actor StorageScanner {
                     }
                     current = current.deletingLastPathComponent()
                 }
-                let values = try location.resourceValues(forKeys: [.isDirectoryKey])
+                let values = try location.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+                if finding.ecosystem == "Ollama LLM", values.isRegularFile == true {
+                    if let updated = try measureOllamaManifest(location) {
+                        report.findings.append(updated)
+                    } else {
+                        retainStale(finding, in: &report)
+                    }
+                    continue
+                }
                 guard values.isDirectory == true else { throw CocoaError(.fileReadUnknown) }
                 let rule = Rule(path: "", title: finding.title, ecosystem: finding.ecosystem,
                                 category: finding.category, uninstallCommand: finding.uninstallCommand,
@@ -158,8 +168,12 @@ actor StorageScanner {
                                      Rule(path: ".cargo/registry", title: "Cargo registry", ecosystem: "Rust"),
                                      Rule(path: ".aws/cli/cache", title: "AWS CLI credential & response cache", ecosystem: "AWS CLI"),
                                      Rule(path: ".aws/sso/cache", title: "AWS SSO token cache", ecosystem: "AWS CLI"),
-                                     Rule(path: "Library/Containers/com.docker.docker/Data/vms", title: "Docker virtual machines", ecosystem: "Docker", category: .tools, command: "docker system df -v"),
-                                     Rule(path: "Library/Application Support/com.apple.container", title: "Apple container storage", ecosystem: "Apple container", category: .tools, command: "container image list")]
+                                     Rule(path: "Library/Containers/com.docker.docker/Data/vms", title: "Docker virtual machines", ecosystem: "Docker", category: .vms, command: "docker system df -v"),
+                                     Rule(path: "Library/Application Support/com.apple.container", title: "Apple container storage", ecosystem: "Apple container", category: .vms, command: "container image list"),
+                                     Rule(path: "Library/Application Support/nomic.ai/GPT4All", title: "GPT4All local models", ecosystem: "GPT4All LLM", category: .vms,
+                                          uninstallCommand: nil,
+                                          explanation: "Local large language model files downloaded in GPT4All.",
+                                          consequence: "Removing deletes downloaded GPT4All model weights.")]
 
     /// The startup volume exposes Data through firmlinks. Skip its /System alias,
     /// and scan mounted local volumes separately so each file tree is visited once.
@@ -176,6 +190,7 @@ actor StorageScanner {
         if let rule = homeRules.first(where: { url.path.hasSuffix("/" + $0.path) }) { return rule }
         if let cli = cliRule(for: url) { return cli }
         if let lang = languageVersionRule(for: url) { return lang }
+        if let vm = vmAndModelRule(for: url) { return vm }
         switch url.path {
         case "/Library/Developer/CommandLineTools":
             return Rule(path: "", title: "Apple Command Line Tools", ecosystem: "Apple CLI", category: .tools,
@@ -184,6 +199,165 @@ actor StorageScanner {
                         consequence: "Uninstalling removes command-line compilers and SDKs outside Xcode. Run xcode-select --install to reinstall if needed.")
         default: return projectRule(url)
         }
+    }
+
+    private func parseSimulatorRuntime(_ runtime: String?) -> (platform: String, label: String) {
+        guard let runtime, !runtime.isEmpty else { return ("Simulator", "") }
+        let raw = runtime.components(separatedBy: "SimRuntime.").last ?? runtime
+        let parts = raw.split(separator: "-").map(String.init)
+        guard let first = parts.first else { return ("Simulator", raw) }
+        let platform = switch first.lowercased() {
+        case "ios": "iOS"
+        case "watchos": "watchOS"
+        case "xros", "visionos": "visionOS"
+        case "tvos": "tvOS"
+        default: first
+        }
+        let version = parts.dropFirst().joined(separator: ".")
+        let label = version.isEmpty ? platform : "\(platform) \(version)"
+        return (platform, label)
+    }
+
+    private func vmAndModelRule(for url: URL) -> Rule? {
+        let path = url.path
+        let name = url.lastPathComponent
+        let ext = url.pathExtension.lowercased()
+        let parentURL = url.deletingLastPathComponent()
+        let parentPath = parentURL.path
+        let parentName = parentURL.lastPathComponent
+        let grandparentPath = parentURL.deletingLastPathComponent().path
+
+        // Apple CoreSimulator Devices (iOS, watchOS, visionOS, tvOS)
+        if parentPath.hasSuffix("/Library/Developer/CoreSimulator/Devices"), UUID(uuidString: name) != nil {
+            let plistURL = url.appendingPathComponent("device.plist")
+            let dict = NSDictionary(contentsOf: plistURL) as? [String: Any]
+            let deviceName = dict?["name"] as? String ?? "Simulator \(name.prefix(8))"
+            let runtimeID = dict?["runtime"] as? String
+            let (platform, runtimeLabel) = parseSimulatorRuntime(runtimeID)
+            let displayTitle = runtimeLabel.isEmpty ? "\(deviceName) Simulator" : "\(deviceName) (\(runtimeLabel))"
+            return Rule(path: "", title: displayTitle, ecosystem: "Xcode Simulator (\(platform))", category: .vms,
+                        uninstallCommand: "xcrun simctl delete \(Finding.quote(name))",
+                        explanation: "Simulated \(platform) device storage (\(deviceName)), including installed apps, app data, and system logs.",
+                        consequence: "Deleting removes this \(platform) simulator device and all data inside it. You can recreate the simulator in Xcode at any time.")
+        }
+
+        // CoreSimulator Runtime profiles & volumes
+        if parentPath == "/Library/Developer/CoreSimulator/Profiles/Runtimes" || ext == "simruntime" {
+            let cleanName = name.replacingOccurrences(of: ".simruntime", with: "")
+            return Rule(path: "", title: "\(cleanName) Simulator Runtime", ecosystem: "Xcode Simulator Runtime", category: .vms,
+                        uninstallCommand: "sudo /bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Installed Xcode Simulator OS runtime bundle (\(cleanName)).",
+                        consequence: "Removing this runtime prevents booting simulators of this OS version until re-downloaded in Xcode.")
+        }
+        if parentPath == "/Library/Developer/CoreSimulator/Volumes" {
+            return Rule(path: "", title: "Simulator Runtime Volume (\(name))", ecosystem: "Xcode Simulator Runtime", category: .vms,
+                        uninstallCommand: "xcrun simctl runtime delete \(Finding.quote(name))",
+                        explanation: "Mounted Apple Simulator runtime disk image volume (\(name)) for iOS, watchOS, visionOS, or tvOS.",
+                        consequence: "Deleting unmounts and removes this simulator OS runtime image.")
+        }
+        if grandparentPath.hasSuffix("/Library/Developer/CoreSimulator/Caches/dyld") {
+            let (platform, label) = parseSimulatorRuntime(name)
+            let display = label.isEmpty ? name : label
+            return Rule(path: "", title: "Simulator dyld cache (\(display))", ecosystem: "Xcode Simulator (\(platform))", category: .caches,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Shared dyld library cache built for \(display) simulators.",
+                        consequence: "Safe to remove when simulators are closed; Xcode will rebuild the cache on next simulator boot.")
+        }
+
+        // UTM Virtual Machines (.utm bundles anywhere or in com.utmapp.UTM)
+        if ext == "utm" {
+            let configURL = url.appendingPathComponent("config.plist")
+            let config = NSDictionary(contentsOf: configURL) as? [String: Any]
+            let info = config?["Information"] as? [String: Any]
+            let vmName = info?["Name"] as? String ?? url.deletingPathExtension().lastPathComponent
+            return Rule(path: "", title: "\(vmName) (UTM VM)", ecosystem: "UTM Virtual Machine", category: .vms,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "UTM virtual machine bundle (\(vmName)) containing virtual disk images and guest OS state.",
+                        consequence: "Deleting permanently removes the \(vmName) virtual machine and all data stored on its virtual disks.")
+        }
+
+        // Parallels (.pvm) & VMware Fusion (.vmwarevm) Virtual Machines
+        if ext == "pvm" {
+            let vmName = url.deletingPathExtension().lastPathComponent
+            return Rule(path: "", title: "\(vmName) (Parallels VM)", ecosystem: "Parallels Desktop", category: .vms,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Parallels Desktop virtual machine bundle (\(vmName)).",
+                        consequence: "Deleting permanently removes this Parallels virtual machine and its virtual hard disks.")
+        }
+        if ext == "vmwarevm" {
+            let vmName = url.deletingPathExtension().lastPathComponent
+            return Rule(path: "", title: "\(vmName) (VMware VM)", ecosystem: "VMware Fusion", category: .vms,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "VMware Fusion virtual machine bundle (\(vmName)).",
+                        consequence: "Deleting permanently removes this VMware virtual machine and its virtual hard disks.")
+        }
+
+        // Android Emulator AVDs (~/.android/avd/<name>.avd)
+        if parentPath.hasSuffix("/.android/avd"), ext == "avd" {
+            let avdName = url.deletingPathExtension().lastPathComponent
+            let iniPath = parentURL.appendingPathComponent(avdName + ".ini").path
+            return Rule(path: "", title: "\(avdName) (Android Emulator)", ecosystem: "Android Emulator", category: .vms,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path)) \(Finding.quote(iniPath))",
+                        explanation: "Android Virtual Device (\(avdName)) disk images and snapshots.",
+                        consequence: "Deleting removes this Android emulator instance and all data inside it.")
+        }
+
+        // Lima, Colima, Tart, and Vagrant VMs
+        if parentPath.hasSuffix("/.lima"), !name.hasPrefix("_"), !name.hasPrefix(".") {
+            return Rule(path: "", title: "\(name) (Lima VM)", ecosystem: "Lima VM", category: .vms,
+                        uninstallCommand: "limactl delete -f \(Finding.quote(name))",
+                        explanation: "Linux virtual machine instance (\(name)) managed by Lima.",
+                        consequence: "Deleting destroys the \(name) Linux VM and its virtual disk.")
+        }
+        if parentPath.hasSuffix("/.colima/_lima") {
+            return Rule(path: "", title: "\(name) (Colima VM)", ecosystem: "Colima VM", category: .vms,
+                        uninstallCommand: "colima delete -f \(Finding.quote(name))",
+                        explanation: "Container runtime virtual machine (\(name)) managed by Colima.",
+                        consequence: "Deleting destroys the Colima VM and all container volumes stored inside it.")
+        }
+        if parentPath.hasSuffix("/.tart/vms") {
+            return Rule(path: "", title: "\(name) (Tart VM)", ecosystem: "Tart VM", category: .vms,
+                        uninstallCommand: "tart delete \(Finding.quote(name))",
+                        explanation: "macOS or Linux virtual machine image (\(name)) managed by Tart.",
+                        consequence: "Deleting removes the \(name) VM image from Tart.")
+        }
+        if parentPath.hasSuffix("/.vagrant.d/boxes") {
+            return Rule(path: "", title: "\(name) (Vagrant Box)", ecosystem: "Vagrant VM", category: .vms,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Cached Vagrant virtual machine base box (\(name)).",
+                        consequence: "Removing deletes this base box; running VMs are separate.")
+        }
+
+        // LM Studio local LLMs: ~/.lmstudio/models/<publisher>/<model> or ~/.cache/lm-studio/models/<publisher>/<model>
+        if grandparentPath.hasSuffix("/.lmstudio/models") || grandparentPath.hasSuffix("/.cache/lm-studio/models"),
+           !parentName.hasPrefix("."), !name.hasPrefix(".")
+        {
+            let modelID = "\(parentName)/\(name)"
+            return Rule(path: "", title: "\(modelID) (LM Studio)", ecosystem: "LM Studio LLM", category: .vms,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Local large language model weights (\(modelID)) stored by LM Studio.",
+                        consequence: "Removing deletes the local GGUF/MLX model files from LM Studio.")
+        }
+
+        // Hugging Face Hub cached models: ~/.cache/huggingface/hub/models--<org>--<repo>
+        if parentPath.hasSuffix("/.cache/huggingface/hub"), name.hasPrefix("models--") {
+            let parts = name.dropFirst("models--".count).components(separatedBy: "--")
+            let modelID = parts.joined(separator: "/")
+            return Rule(path: "", title: "\(modelID) (Hugging Face)", ecosystem: "Hugging Face LLM", category: .vms,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Local model weights and snapshots (\(modelID)) cached in Hugging Face Hub.",
+                        consequence: "Removing deletes cached weights for \(modelID). Tools using it will re-download if needed.")
+        }
+
+        // Jan AI local LLMs: ~/jan/models/<model> or ~/Library/Application Support/Jan/data/models/<model>
+        if parentPath.hasSuffix("/jan/models") || parentPath.hasSuffix("/Jan/data/models"), !name.hasPrefix(".") {
+            return Rule(path: "", title: "\(name) (Jan AI)", ecosystem: "Jan AI LLM", category: .vms,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Local language model (\(name)) downloaded in Jan AI.",
+                        consequence: "Removing deletes this local model from Jan AI.")
+        }
+
+        return nil
     }
 
     private func displayLanguageName(_ raw: String) -> String {
@@ -556,6 +730,13 @@ actor StorageScanner {
                 guard values.isDirectory == true else { continue }
                 if shouldSkip(url) { walker.skipDescendants(); continue }
                 report.directoriesVisited += 1
+                if url.path.hasSuffix("/.ollama/models") {
+                    walker.skipDescendants()
+                    try recordOllamaModels(at: url, measured: &measured, report: &report)
+                    await progress(ScanProgress(path: url.path, directoriesVisited: report.directoriesVisited, findingsCount: report.findings.count))
+                    lastUpdate = .now
+                    continue
+                }
                 let rule = rule(for: url)
                 if rule != nil || lastUpdate.duration(to: .now) > .milliseconds(150) {
                     await progress(ScanProgress(path: url.path, directoriesVisited: report.directoriesVisited, findingsCount: report.findings.count))
@@ -626,13 +807,13 @@ actor StorageScanner {
             report.inaccessibleLocations += 1
             if report.issues.count < 200 { report.issues.append("Some files could not be measured in \(path). Size is a lower bound.") }
         }
-        let isTool = rule.category == .tools
+        let isTool = rule.category == .tools || rule.category == .vms
         let isTerraform = rule.ecosystem == "Terraform"
         let explanation: LocalizedStringResource = rule.explanation ?? (isTool
-            ? "Installed tools or container data. Size alone does not show whether this is still needed."
+            ? "Installed tools, virtual machines, or local model data. Size alone does not show whether this is still needed."
             : "Generated files associated with this tool or project. Review the folder before removing it.")
         let consequence: LocalizedStringResource = rule.consequence ?? (isTool
-            ? "Review versions and usage with the owning tool. Container storage may include databases and volumes. Do not delete the storage directory directly."
+            ? "Review versions and usage with the owning tool. Container or VM storage may include databases and disks. Do not delete the storage directory directly."
             : isTerraform
             ? "Review this directory for local state, workspaces, and custom files first. Back up any state. Removing it requires terraform init again; root .tfstate files are outside this finding."
             : rule.category == .dependencies
@@ -644,5 +825,92 @@ actor StorageScanner {
                                        explanation: explanation, consequence: consequence,
                                        uninstallCommand: rule.uninstallCommand, inspectionCommand: command, incomplete: incomplete,
                                        volumeURL: try? url.resourceValues(forKeys: [.volumeURLKey]).volume))
+    }
+
+    private func recordOllamaModels(at modelsDir: URL, measured: inout Set<String>, report: inout ScanReport) throws {
+        let manifestsRoot = modelsDir.appendingPathComponent("manifests", isDirectory: true)
+        var recordedAny = false
+        if let walker = manager.enumerator(at: manifestsRoot, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]) {
+            for case let fileURL as URL in walker {
+                try Task.checkCancellation()
+                let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                if values?.isSymbolicLink == true { continue }
+                guard values?.isRegularFile == true, !fileURL.lastPathComponent.hasPrefix(".") else { continue }
+                if let finding = try measureOllamaManifest(fileURL) {
+                    measured.insert(fileURL.standardizedFileURL.path)
+                    report.findings.append(finding)
+                    recordedAny = true
+                }
+            }
+        }
+        if !recordedAny {
+            let fallback = Rule(path: "", title: "Ollama local models", ecosystem: "Ollama LLM", category: .vms,
+                                uninstallCommand: "/bin/rm -rf -- \(Finding.quote(modelsDir.path))",
+                                command: "ollama list",
+                                explanation: "Local large language model blobs and manifests stored by Ollama.",
+                                consequence: "Removing deletes all local Ollama models.")
+            try record(modelsDir, rule: fallback, measured: &measured, report: &report)
+        }
+    }
+
+    private func measureOllamaManifest(_ manifestURL: URL) throws -> Finding? {
+        let path = manifestURL.standardizedFileURL.path
+        guard let markerRange = path.range(of: "/.ollama/models/manifests/") else { return nil }
+        let modelsBasePath = String(path[..<markerRange.lowerBound]) + "/.ollama/models"
+        let blobsDir = URL(fileURLWithPath: modelsBasePath, isDirectory: true).appendingPathComponent("blobs", isDirectory: true)
+        let relative = String(path[markerRange.upperBound...])
+        let components = relative.split(separator: "/").map(String.init)
+        guard components.count >= 2 else { return nil }
+        let tag = components.last!
+        let modelParts = components.dropFirst().dropLast()
+        let modelPath: String = if modelParts.first == "library", modelParts.count > 1 {
+            modelParts.dropFirst().joined(separator: "/")
+        } else if !modelParts.isEmpty {
+            modelParts.joined(separator: "/")
+        } else {
+            components.dropLast().joined(separator: "/")
+        }
+        let modelSpec = "\(modelPath):\(tag)"
+
+        let data = try Data(contentsOf: manifestURL)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        var digests: [(digest: String, fallbackSize: Int64)] = []
+        if let config = json["config"] as? [String: Any], let digest = config["digest"] as? String {
+            let size = (config["size"] as? NSNumber)?.int64Value ?? 0
+            digests.append((digest, size))
+        }
+        if let layers = json["layers"] as? [[String: Any]] {
+            for layer in layers {
+                if let digest = layer["digest"] as? String {
+                    let size = (layer["size"] as? NSNumber)?.int64Value ?? 0
+                    digests.append((digest, size))
+                }
+            }
+        }
+        var totalBytes: Int64 = (try? manifestURL.resourceValues(forKeys: [.fileAllocatedSizeKey, .fileSizeKey]))
+            .map { Int64($0.fileAllocatedSize ?? $0.fileSize ?? 0) } ?? Int64(data.count)
+        for item in digests {
+            let blobName = item.digest.replacingOccurrences(of: ":", with: "-")
+            let blobURL = blobsDir.appendingPathComponent(blobName)
+            if let values = try? blobURL.resourceValues(forKeys: [.fileAllocatedSizeKey, .fileSizeKey]),
+               let diskBytes = values.fileAllocatedSize ?? values.fileSize
+            {
+                totalBytes += Int64(diskBytes)
+            } else {
+                totalBytes += item.fallbackSize
+            }
+        }
+        return Finding(url: manifestURL,
+                       title: "\(modelSpec) (Ollama model)",
+                       ecosystem: "Ollama LLM",
+                       category: .vms,
+                       bytes: totalBytes,
+                       modified: try? manifestURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+                       explanation: "Local large language model (\(modelSpec)) weights and manifest stored in Ollama.",
+                       consequence: "Uninstalling removes \(modelSpec) and frees its unshared layer blobs in Ollama.",
+                       uninstallCommand: "ollama rm \(Finding.quote(modelSpec))",
+                       inspectionCommand: nil,
+                       incomplete: false,
+                       volumeURL: try? manifestURL.resourceValues(forKeys: [.volumeURLKey]).volume)
     }
 }
