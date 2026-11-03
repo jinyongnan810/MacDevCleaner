@@ -21,8 +21,77 @@ final class CleanerModel {
     var volumesScanned = 0
     var status: LocalizedStringResource = "Ready to find developer storage across this Mac."
     var ignored: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "ignoredPaths") ?? [])
+    var selectedGroupItemIDs: Set<String> = []
     private var task: Task<Void, Never>?
     private let scanner = StorageScanner()
+
+    subscript(isSelected id: String) -> Bool {
+        get { selectedGroupItemIDs.contains(id) }
+        set {
+            if newValue {
+                selectedGroupItemIDs.insert(id)
+            } else {
+                selectedGroupItemIDs.remove(id)
+            }
+        }
+    }
+
+    func selectAll(in group: FindingGroup) {
+        for item in group.items where !item.measurementIsStale {
+            selectedGroupItemIDs.insert(item.id)
+        }
+    }
+
+    func deselectAll(in group: FindingGroup) {
+        for item in group.items {
+            selectedGroupItemIDs.remove(item.id)
+        }
+    }
+
+    func selectedItems(in group: FindingGroup) -> [Finding] {
+        group.items.filter { selectedGroupItemIDs.contains($0.id) && !$0.measurementIsStale }
+    }
+
+    func deleteSelected(in group: FindingGroup) {
+        let targets = selectedItems(in: group)
+        guard !isBusy, !targets.isEmpty else { return }
+        isRefreshing = true
+        status = "Deleting \(targets.count) selected folders…"
+        let previous = findings
+        task = Task {
+            var deleteErrors: [String] = []
+            for item in targets {
+                do {
+                    try FileManager.default.removeItem(at: item.url)
+                    selectedGroupItemIDs.remove(item.id)
+                } catch {
+                    deleteErrors.append("\(item.url.path): \(error.localizedDescription)")
+                }
+            }
+            do {
+                let report = try await scanner.refresh(previous)
+                try Task.checkCancellation()
+                findings = report.findings
+                let validIDs = Set(report.findings.map(\.id))
+                selectedGroupItemIDs.formIntersection(validIDs)
+                refreshIssues = report.issues + deleteErrors
+                refreshInaccessibleLocations = report.inaccessibleLocations + deleteErrors.count
+                refreshedAt = .now
+                needsRefreshAfterCopy = false
+                let removed = previous.count - findings.count
+                status = deleteErrors.isEmpty
+                    ? "Deleted \(removed) selected locations and refreshed results."
+                    : "Some selected locations could not be deleted. Review access issues."
+            } catch is CancellationError {
+                status = "Cleanup canceled."
+            } catch {
+                refreshIssues = [error.localizedDescription] + deleteErrors
+                status = "Could not refresh results after deletion."
+            }
+            isRefreshing = false
+            task = nil
+        }
+    }
 
     func scan() {
         guard !isBusy else { return }
@@ -36,6 +105,7 @@ final class CleanerModel {
                 }
                 try Task.checkCancellation()
                 findings = report.findings
+                selectedGroupItemIDs = Set(report.findings.filter { $0.groupKey != nil }.map(\.id))
                 refreshIssues = []
                 refreshInaccessibleLocations = 0
                 refreshedAt = nil
@@ -67,6 +137,8 @@ final class CleanerModel {
                 let report = try await scanner.refresh(previous)
                 try Task.checkCancellation()
                 findings = report.findings
+                let validIDs = Set(report.findings.map(\.id))
+                selectedGroupItemIDs.formIntersection(validIDs)
                 refreshIssues = report.issues
                 refreshInaccessibleLocations = report.inaccessibleLocations
                 refreshedAt = .now

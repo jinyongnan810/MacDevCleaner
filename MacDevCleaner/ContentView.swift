@@ -45,8 +45,34 @@ struct ContentView: View {
             case .tools: !ignored && item.category == .tools
             case .vms: !ignored && item.category == .vms
             }
-            return matches && (search.isEmpty || "\(item.title) \(item.ecosystem) \(item.id)".localizedCaseInsensitiveContains(search))
+            return matches && (search.isEmpty || "\(item.title) \(item.groupTitle ?? "") \(item.ecosystem) \(item.id)".localizedCaseInsensitiveContains(search))
         }
+    }
+
+    private var visibleDisplayItems: [FindingDisplayItem] {
+        var singles: [FindingDisplayItem] = []
+        var groupedBuckets: [String: [Finding]] = [:]
+        for item in visibleFindings {
+            if let key = item.groupKey {
+                groupedBuckets[key, default: []].append(item)
+            } else {
+                singles.append(.single(item))
+            }
+        }
+        var result = singles
+        for (key, members) in groupedBuckets {
+            let sortedMembers = members.sorted { $0.bytes > $1.bytes }
+            guard let first = sortedMembers.first else { continue }
+            let group = FindingGroup(id: key,
+                                     title: first.groupTitle ?? first.title,
+                                     ecosystem: first.ecosystem,
+                                     category: first.category,
+                                     explanation: first.explanation,
+                                     consequence: first.consequence,
+                                     items: sortedMembers)
+            result.append(.group(group))
+        }
+        return result.sorted { $0.bytes > $1.bytes }
     }
 
     var body: some View {
@@ -57,7 +83,8 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 ScanOverview(findings: model.findings.filter { !model.ignored.contains($0.id) }, completedAt: model.completedAt)
                 Divider()
-                FindingsPanel(items: visibleFindings, selection: $selection, isScanning: model.isScanning,
+                FindingsPanel(items: visibleDisplayItems, selectedIDs: model.selectedGroupItemIDs,
+                              selection: $selection, isScanning: model.isScanning,
                               hasScanned: model.completedAt != nil, filter: filter ?? .all,
                               progress: model.progress, scan: model.scan)
                     .frame(maxHeight: .infinity)
@@ -68,9 +95,14 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 360, ideal: 490)
             .searchable(text: $search, prompt: "Find a tool, project, or path")
         } detail: {
-            if let item = visibleFindings.first(where: { $0.id == selection }) {
-                FindingInspector(item: item, ignored: model.ignored.contains(item.id), isBusy: model.isBusy,
-                                 toggleIgnored: { model.toggleIgnored(item) }, commandCopied: model.commandCopied, refresh: model.refreshResults)
+            if let displayItem = visibleDisplayItems.first(where: { $0.id == selection }) {
+                switch displayItem {
+                case let .single(item):
+                    FindingInspector(item: item, ignored: model.ignored.contains(item.id), isBusy: model.isBusy,
+                                     toggleIgnored: { model.toggleIgnored(item) }, commandCopied: model.commandCopied, refresh: model.refreshResults)
+                case let .group(group):
+                    GroupInspector(group: group, model: model)
+                }
             } else {
                 ContentUnavailableView("A little context before cleanup", systemImage: "terminal",
                                        description: Text("Select a finding to see what it is, what removal means, and a command you can review."))
@@ -211,7 +243,8 @@ private struct CategoryMetric: View {
 }
 
 private struct FindingsPanel: View {
-    let items: [Finding]
+    let items: [FindingDisplayItem]
+    let selectedIDs: Set<String>
     @Binding var selection: String?
     let isScanning: Bool
     let hasScanned: Bool
@@ -249,31 +282,61 @@ private struct FindingsPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(items, selection: $selection) { item in
-                    FindingRow(item: item).tag(item.id)
+                    FindingDisplayRow(item: item, selectedIDs: selectedIDs).tag(item.id)
                 }.listStyle(.inset)
             }
         }
     }
 }
 
-private struct FindingRow: View {
-    let item: Finding
+private struct FindingDisplayRow: View {
+    let item: FindingDisplayItem
+    let selectedIDs: Set<String>
+
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: item.category.symbol)
-                .font(.title3).foregroundStyle(.teal)
-                .frame(width: 38, height: 42)
-                .background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-            VStack(alignment: .leading, spacing: 5) {
-                Text(item.title).font(.headline).lineLimit(1)
-                Text(item.ecosystem).font(.caption).foregroundStyle(.secondary)
-                Text(item.url.path).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
-            }
-            Spacer(minLength: 4)
-            VStack(alignment: .trailing, spacing: 5) {
-                Text(item.displaySize).font(.subheadline.weight(.semibold)).monospacedDigit()
-                Text(item.measurementIsStale ? "Needs recheck" : item.incomplete ? "Partial size" : item.uninstallCommand != nil ? "Uninstallable" : item.inspectionCommand != nil ? "Review usage" : "Regenerable")
-                    .font(.caption2).foregroundStyle(.secondary)
+            switch item {
+            case let .single(finding):
+                Image(systemName: finding.category.symbol)
+                    .font(.title3).foregroundStyle(.teal)
+                    .frame(width: 38, height: 42)
+                    .background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(finding.title).font(.headline).lineLimit(1)
+                    Text(finding.ecosystem).font(.caption).foregroundStyle(.secondary)
+                    Text(finding.url.path).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text(finding.displaySize).font(.subheadline.weight(.semibold)).monospacedDigit()
+                    Text(finding.measurementIsStale ? "Needs recheck" : finding.incomplete ? "Partial size" : finding.uninstallCommand != nil ? "Uninstallable" : finding.inspectionCommand != nil ? "Review usage" : "Regenerable")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            case let .group(group):
+                let checkedCount = group.items.filter { selectedIDs.contains($0.id) }.count
+                Image(systemName: "checklist")
+                    .font(.title3).foregroundStyle(.teal)
+                    .frame(width: 38, height: 42)
+                    .background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(group.title).font(.headline).lineLimit(1)
+                        Text("\(group.items.count)")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(.teal.opacity(0.15), in: Capsule())
+                    }
+                    Text("\(group.ecosystem) · \(checkedCount) of \(group.items.count) selected")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Grouped folders — select to choose which projects to delete")
+                        .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text(group.displaySize).font(.subheadline.weight(.semibold)).monospacedDigit()
+                    Text("Batch select")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
         }.padding(.vertical, 8)
     }
@@ -365,6 +428,153 @@ private struct FindingInspector: View {
         }
         .frame(minWidth: 300)
         .background(.background)
+    }
+}
+
+private struct GroupInspector: View {
+    let group: FindingGroup
+    @Bindable var model: CleanerModel
+    @State private var confirmingDelete = false
+
+    private var selectedItems: [Finding] {
+        model.selectedItems(in: group)
+    }
+
+    private var selectedBytes: Int64 {
+        selectedItems.reduce(0) { $0 + $1.bytes }
+    }
+
+    private var selectedSizeText: String {
+        ByteCountFormatter.string(fromByteCount: selectedBytes, countStyle: .file)
+    }
+
+    private var combinedCommand: String {
+        let paths = selectedItems.map { Finding.quote($0.url.path) }.joined(separator: " ")
+        return "/bin/rm -rf -- \(paths)"
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Image(systemName: "checklist").font(.largeTitle).foregroundStyle(.teal)
+                    Text("\(group.ecosystem) · \(group.items.count) folders").font(.subheadline).foregroundStyle(.secondary)
+                    Text(group.title).font(.title.weight(.semibold))
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(group.displaySize)
+                            .font(.system(.title, design: .rounded, weight: .medium)).monospacedDigit()
+                        Text("total (\(selectedSizeText) selected)")
+                            .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                }
+
+                DetailSection(title: "What you’re looking at", text: group.explanation)
+                DetailSection(title: "Before you decide", text: group.consequence)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Choose folders to delete (\(selectedItems.count)/\(group.items.count))")
+                            .font(.headline)
+                        Spacer()
+                        Button("Select All") { model.selectAll(in: group) }
+                            .buttonStyle(.link)
+                        Text("·").foregroundStyle(.secondary)
+                        Button("Deselect All") { model.deselectAll(in: group) }
+                            .buttonStyle(.link)
+                    }
+
+                    VStack(spacing: 8) {
+                        ForEach(group.items) { member in
+                            GroupMemberRow(member: member,
+                                           isSelected: $model[isSelected: member.id],
+                                           isIgnored: model.ignored.contains(member.id),
+                                           toggleIgnored: { model.toggleIgnored(member) })
+                        }
+                    }
+                }
+
+                if selectedItems.isEmpty {
+                    DetailSection(title: "No folders selected",
+                                  text: "Check one or more folders above to generate a batch cleanup command or delete them.")
+                } else {
+                    Button(role: .destructive) {
+                        confirmingDelete = true
+                    } label: {
+                        Label("Delete \(selectedItems.count) Selected Folders (\(selectedSizeText))…", systemImage: "trash")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.large)
+                    .disabled(model.isBusy)
+
+                    CommandCard(command: combinedCommand, isUninstall: false, isInspection: false, onCopy: model.commandCopied)
+                        .id(combinedCommand)
+                }
+
+                Button("Refresh results", systemImage: "arrow.clockwise", action: model.refreshResults)
+                    .disabled(model.isBusy)
+            }
+            .padding(28)
+        }
+        .frame(minWidth: 320)
+        .background(.background)
+        .confirmationDialog("Delete \(selectedItems.count) selected folders (\(selectedSizeText))?",
+                            isPresented: $confirmingDelete,
+                            titleVisibility: .visible)
+        {
+            Button("Delete \(selectedItems.count) Folders", role: .destructive) {
+                model.deleteSelected(in: group)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes the \(selectedItems.count) checked \(group.title) from disk and cannot be undone.")
+        }
+    }
+}
+
+private struct GroupMemberRow: View {
+    let member: Finding
+    @Binding var isSelected: Bool
+    let isIgnored: Bool
+    let toggleIgnored: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Toggle("", isOn: $isSelected)
+                .labelsHidden()
+                .disabled(member.measurementIsStale)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(member.title).font(.subheadline.weight(.medium)).lineLimit(1)
+                    Spacer()
+                    Text(member.displaySize).font(.subheadline.weight(.semibold)).monospacedDigit()
+                }
+                Text(member.url.path)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                HStack(spacing: 12) {
+                    if let date = member.modified {
+                        Text(date, format: .dateTime.year().month().day())
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    Button("Show in Finder", systemImage: "folder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([member.url])
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption2)
+                    Button(isIgnored ? "Restore" : "Ignore", systemImage: isIgnored ? "eye" : "eye.slash", action: toggleIgnored)
+                        .buttonStyle(.link)
+                        .font(.caption2)
+                }
+            }
+        }
+        .padding(10)
+        .background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 

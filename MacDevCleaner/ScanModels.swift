@@ -33,6 +33,8 @@ nonisolated struct Finding: Identifiable, Sendable {
     let consequence: LocalizedStringResource
     let uninstallCommand: String?
     let inspectionCommand: String?
+    var groupKey: String?
+    var groupTitle: String?
     var incomplete: Bool
     var measurementIsStale = false
     var volumeURL: URL?
@@ -40,6 +42,37 @@ nonisolated struct Finding: Identifiable, Sendable {
     var command: String { uninstallCommand ?? inspectionCommand ?? "/bin/rm -rf -- \(Self.quote(url.path))" }
     static func quote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
     var displaySize: String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
+}
+
+nonisolated struct FindingGroup: Identifiable, Sendable {
+    let id: String
+    let title: String
+    let ecosystem: String
+    let category: FindingCategory
+    let explanation: LocalizedStringResource
+    let consequence: LocalizedStringResource
+    let items: [Finding]
+    var totalBytes: Int64 { items.reduce(0) { $0 + $1.bytes } }
+    var displaySize: String { ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file) }
+}
+
+nonisolated enum FindingDisplayItem: Identifiable, Sendable {
+    case single(Finding)
+    case group(FindingGroup)
+
+    var id: String {
+        switch self {
+        case let .single(finding): finding.id
+        case let .group(group): group.id
+        }
+    }
+
+    var bytes: Int64 {
+        switch self {
+        case let .single(finding): finding.bytes
+        case let .group(group): group.totalBytes
+        }
+    }
 }
 
 nonisolated struct ScanReport: Sendable {
@@ -68,6 +101,8 @@ actor StorageScanner {
         var category: FindingCategory = .caches
         var uninstallCommand: String?
         var command: String?
+        var groupKey: String?
+        var groupTitle: String?
         var explanation: LocalizedStringResource?
         var consequence: LocalizedStringResource?
     }
@@ -128,7 +163,8 @@ actor StorageScanner {
                 guard values.isDirectory == true else { throw CocoaError(.fileReadUnknown) }
                 let rule = Rule(path: "", title: finding.title, ecosystem: finding.ecosystem,
                                 category: finding.category, uninstallCommand: finding.uninstallCommand,
-                                command: finding.inspectionCommand, explanation: finding.explanation,
+                                command: finding.inspectionCommand, groupKey: finding.groupKey,
+                                groupTitle: finding.groupTitle, explanation: finding.explanation,
                                 consequence: finding.consequence)
                 let count = report.findings.count
                 try record(location, rule: rule, measured: &measured, report: &report)
@@ -760,16 +796,42 @@ actor StorageScanner {
     }
 
     private func projectRule(_ url: URL) -> Rule? {
+        let projectName = url.deletingLastPathComponent().lastPathComponent
         switch url.lastPathComponent {
-        case "node_modules": Rule(path: "", title: "\(url.deletingLastPathComponent().lastPathComponent) dependencies", ecosystem: "Node.js", category: .dependencies)
-        case ".venv", "venv": manager.fileExists(atPath: url.appendingPathComponent("pyvenv.cfg").path)
-            ? Rule(path: "", title: "\(url.deletingLastPathComponent().lastPathComponent) virtual environment", ecosystem: "Python", category: .dependencies) : nil
-        case ".terraform": Rule(path: "", title: "Terraform working data", ecosystem: "Terraform", category: .dependencies, command: "/bin/ls -lah \(Finding.quote(url.path))")
-        case ".build": manager.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("Package.swift").path)
-            ? Rule(path: "", title: "Swift build output", ecosystem: "Swift") : nil
-        case "target": manager.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("Cargo.toml").path)
-            ? Rule(path: "", title: "Rust build output", ecosystem: "Rust") : nil
-        default: nil
+        case "node_modules":
+            return Rule(path: "", title: "\(projectName) dependencies", ecosystem: "Node.js", category: .dependencies,
+                        groupKey: "group:node_modules", groupTitle: "node_modules folders")
+        case ".venv", "venv":
+            return manager.fileExists(atPath: url.appendingPathComponent("pyvenv.cfg").path)
+                ? Rule(path: "", title: "\(projectName) virtual environment", ecosystem: "Python", category: .dependencies,
+                       groupKey: "group:python_venv", groupTitle: "Python virtual environments (.venv)")
+                : nil
+        case "Pods":
+            return manager.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("Podfile").path)
+                ? Rule(path: "", title: "\(projectName) Pods", ecosystem: "CocoaPods", category: .dependencies,
+                       groupKey: "group:cocoapods_pods", groupTitle: "CocoaPods Pods folders")
+                : nil
+        case ".terraform":
+            return Rule(path: "", title: "\(projectName) Terraform data", ecosystem: "Terraform", category: .dependencies,
+                        command: "/bin/ls -lah \(Finding.quote(url.path))",
+                        groupKey: "group:terraform", groupTitle: "Terraform working directories (.terraform)")
+        case ".build":
+            return manager.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("Package.swift").path)
+                ? Rule(path: "", title: "\(projectName) Swift build", ecosystem: "Swift",
+                       groupKey: "group:swift_build", groupTitle: "Swift package build outputs (.build)")
+                : nil
+        case "target":
+            return manager.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("Cargo.toml").path)
+                ? Rule(path: "", title: "\(projectName) Rust target", ecosystem: "Rust",
+                       groupKey: "group:rust_target", groupTitle: "Rust Cargo build outputs (target)")
+                : nil
+        case ".next":
+            return manager.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("package.json").path)
+                ? Rule(path: "", title: "\(projectName) Next.js build", ecosystem: "Next.js",
+                       groupKey: "group:nextjs_build", groupTitle: "Next.js build caches (.next)")
+                : nil
+        default:
+            return nil
         }
     }
 
@@ -823,7 +885,8 @@ actor StorageScanner {
         report.findings.append(Finding(url: url, title: rule.title, ecosystem: rule.ecosystem, category: rule.category, bytes: bytes,
                                        modified: try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
                                        explanation: explanation, consequence: consequence,
-                                       uninstallCommand: rule.uninstallCommand, inspectionCommand: command, incomplete: incomplete,
+                                       uninstallCommand: rule.uninstallCommand, inspectionCommand: command,
+                                       groupKey: rule.groupKey, groupTitle: rule.groupTitle, incomplete: incomplete,
                                        volumeURL: try? url.resourceValues(forKeys: [.volumeURLKey]).volume))
     }
 
