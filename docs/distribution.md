@@ -33,7 +33,49 @@ Install [asc](https://github.com/rudrankriyam/App-Store-Connect-CLI), then:
      --private-key /absolute/path/AuthKey_KEYID.p8
    ```
 
-## Each release
+## Automated release (recommended)
+
+Run the automated packaging script from the repository root:
+
+```sh
+make package
+# or directly:
+./scripts/package.sh
+```
+
+The script runs the complete release pipeline:
+1. Verifies local signing certificate and App Store Connect API credentials.
+2. Archives the project with the `Release` build configuration.
+3. Exports the Developer ID–signed app with Hardened Runtime enabled.
+4. Packages the app into a signed disk image (`dist/MacDevCleaner-<version>-<build>.dmg`).
+5. Submits the DMG to the Apple Notary Service (`xcrun notarytool`) and waits for approval.
+6. Staples the notarization ticket to the DMG and validates Gatekeeper compliance (`spctl`).
+7. Computes and writes the SHA-256 checksum file (`dist/MacDevCleaner-<version>-<build>.dmg.sha256`).
+
+### Script options and overrides
+
+Defaults are configured for local release (`/Users/kin/Documents/MacDevCleaner.p8`, Key ID `Z962439KCL`, Issuer ID `86621a93-af27-4c2a-9740-e91edb76fc3f`), and can be customized via flags or environment variables:
+
+```sh
+# Overwrite existing release in dist/
+make package ARGS="--force"
+
+# Build and package signed DMG without waiting for Apple notarization
+make package ARGS="--skip-notarize"
+
+# Specify custom key path or credentials
+./scripts/package.sh \
+  --key-path /path/to/AuthKey.p8 \
+  --key-id YOUR_KEY_ID \
+  --issuer-id YOUR_ISSUER_ID \
+  --force
+```
+
+---
+
+## Manual release (alternative)
+
+If you prefer to perform each step individually:
 
 ### 1. Export from Xcode
 

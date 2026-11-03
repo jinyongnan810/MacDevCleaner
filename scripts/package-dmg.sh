@@ -55,10 +55,16 @@ if [[ -s "$work/entitlements.plist" ]]; then
 fi
 
 # Resolve the output relative to this script, so it always goes into repo/dist.
-# Refuse existing files and symlinks to protect previously packaged releases.
+# Refuse existing files and symlinks unless FORCE=1 is set.
 root=$(cd "$(dirname "$0")/.." && pwd)
 output="$root/dist/MacDevCleaner-$version-$build.dmg"
-[[ ! -e "$output" && ! -L "$output" ]] || fail "Output already exists: $output. Move it aside or increment the build number."
+if [[ -e "$output" || -L "$output" ]]; then
+    if [[ "${FORCE:-0}" == "1" ]]; then
+        /bin/rm -f "$output" "$output.sha256"
+    else
+        fail "Output already exists: $output. Move it aside, increment the build number, or pass FORCE=1."
+    fi
+fi
 /bin/mkdir -p "$root/dist" "$work/staging"
 # ditto preserves the bundle's metadata and signature. The Applications symlink
 # gives users a drag-and-drop installation destination inside the mounted DMG.
@@ -69,9 +75,7 @@ output="$root/dist/MacDevCleaner-$version-$build.dmg"
 # Sign the outer image separately; leave the exported app's signature intact.
 /usr/bin/codesign --sign "$identity" --timestamp "$work/MacDevCleaner.dmg"
 /usr/bin/codesign --verify --strict --verbose=2 "$work/MacDevCleaner.dmg"
-# Publish the image locally only after signing succeeds. mv -n also protects an
-# output created after our earlier check; it can skip the move without an error,
-# so check whether the temporary source still exists before reporting success.
-/bin/mv -n "$work/MacDevCleaner.dmg" "$output"
+# Publish the image locally only after signing succeeds.
+/bin/mv -f "$work/MacDevCleaner.dmg" "$output"
 [[ ! -e "$work/MacDevCleaner.dmg" ]] || fail 'Output appeared during packaging; refusing to replace it.'
 printf '\nCreated: %s\nNext: notarize and staple this DMG before publishing (see docs/distribution.md).\n' "$output"

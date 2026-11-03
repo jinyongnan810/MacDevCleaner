@@ -37,4 +37,4 @@ Run `make lint` after Swift changes. Build using Xcode MCP BuildProject. Do not 
 
 ## Direct distribution
 
-Distribute a Developer ID–signed, notarized DMG. See [the release guide](docs/distribution.md) for certificate setup, Xcode archive/export, `make dmg`, notarization, and installation verification. Packaging takes an exported app and does not build or modify its signature.
+Distribute a Developer ID–signed, notarized DMG. Run `make package` (or `./scripts/package.sh`) for fully automated archiving, export, DMG creation, Apple notarization, and stapling. See [the release guide](docs/distribution.md) for certificate setup, notarization credentials, script options, and installation verification.
