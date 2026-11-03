@@ -1,9 +1,14 @@
 import AppKit
 import SwiftUI
 
+/// Category filter options available in the sidebar.
 private enum ScanFilter: String, CaseIterable, Identifiable {
     case all, caches, dependencies, tools, vms, apps, ignored
+
+    /// Unique identifier for each filter case.
     var id: String { rawValue }
+
+    /// Localized display name for the filter.
     var title: LocalizedStringResource {
         switch self {
         case .all: "All findings"
@@ -16,6 +21,7 @@ private enum ScanFilter: String, CaseIterable, Identifiable {
         }
     }
 
+    /// SF Symbol name representing this filter.
     var symbol: String {
         switch self {
         case .all: "square.grid.2x2"
@@ -29,13 +35,24 @@ private enum ScanFilter: String, CaseIterable, Identifiable {
     }
 }
 
+/// Primary navigation split view containing sidebar, findings list, and inspector details.
 struct ContentView: View {
+    /// Shared view model driving the scan state and user interactions.
     @State private var model = CleanerModel()
+
+    /// Currently selected category filter in the sidebar.
     @State private var filter: ScanFilter? = .all
+
+    /// ID of the currently selected finding or group in the content list.
     @State private var selection: String?
+
+    /// Current search query filtering visible findings.
     @State private var search = ""
+
+    /// Controls presentation of the scan access and diagnostic sheet.
     @State private var showingIssues = false
 
+    /// Findings matching the active category filter and search query.
     private var visibleFindings: [Finding] {
         model.findings.filter { item in
             let ignored = model.ignored.contains(item.id)
@@ -52,6 +69,7 @@ struct ContentView: View {
         }
     }
 
+    /// Display items organized into individual findings and clustered groups.
     private var visibleDisplayItems: [FindingDisplayItem] {
         var singles: [FindingDisplayItem] = []
         var groupedBuckets: [String: [Finding]] = [:]
@@ -78,6 +96,7 @@ struct ContentView: View {
         return result.sorted { $0.bytes > $1.bytes }
     }
 
+    /// Main user interface layout using a three-pane NavigationSplitView.
     var body: some View {
         NavigationSplitView {
             CleanerSidebar(filter: $filter, showingAccess: $showingIssues)
@@ -139,9 +158,12 @@ struct ContentView: View {
     }
 }
 
+/// View modifier triggering a refresh when the app transitions to the active state.
 private struct RefreshOnReturn: ViewModifier {
+    /// View model to notify when returning to active state.
     let model: CleanerModel
 
+    /// Listens for application did-become-active notifications to refresh results.
     func body(content: Content) -> some View {
         content.onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshAfterReturning()
@@ -149,10 +171,15 @@ private struct RefreshOnReturn: ViewModifier {
     }
 }
 
+/// Sidebar view displaying category filters, scan scopes, and safety information.
 private struct CleanerSidebar: View {
+    /// Binding to the selected sidebar category filter.
     @Binding var filter: ScanFilter?
+
+    /// Binding to present the scan access issues sheet.
     @Binding var showingAccess: Bool
 
+    /// Layout for the navigation sidebar.
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -191,11 +218,18 @@ private struct CleanerSidebar: View {
     }
 }
 
+/// Header banner displaying total storage discovered and category breakdown cards.
 private struct ScanOverview: View {
+    /// Non-ignored findings included in the overview calculation.
     let findings: [Finding]
+
+    /// Timestamp of scan completion, used to toggle placeholder display.
     let completedAt: Date?
+
+    /// Total aggregated bytes across all visible findings.
     private var bytes: Int64 { findings.reduce(0) { $0 + $1.bytes } }
 
+    /// Layout for the overview metrics and category cards.
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .top) {
@@ -228,9 +262,15 @@ private struct ScanOverview: View {
     }
 }
 
+/// Card displaying an individual category's icon, title, and disk usage.
 private struct CategoryMetric: View {
+    /// Finding category represented by this metric card.
     let category: FindingCategory
+
+    /// Total byte size accumulated in this category.
     let bytes: Int64
+
+    /// Layout for the category metric card.
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Image(systemName: category.symbol).foregroundStyle(.teal)
@@ -245,16 +285,33 @@ private struct CategoryMetric: View {
     }
 }
 
+/// Middle column displaying the list of findings, scan progress, or empty state.
 private struct FindingsPanel: View {
+    /// Display items to render in the list.
     let items: [FindingDisplayItem]
+
+    /// IDs of selected items for count badges.
     let selectedIDs: Set<String>
+
+    /// Binding to the currently selected finding ID.
     @Binding var selection: String?
+
+    /// Flag indicating whether a scan is currently running.
     let isScanning: Bool
+
+    /// Flag indicating whether a scan has finished at least once.
     let hasScanned: Bool
+
+    /// Active category filter for title display.
     let filter: ScanFilter
+
+    /// Current scan progress metrics.
     let progress: ScanProgress
+
+    /// Callback closure to trigger a new scan.
     let scan: () -> Void
 
+    /// Layout for the findings list and status placeholders.
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -292,10 +349,15 @@ private struct FindingsPanel: View {
     }
 }
 
+/// Row view rendering either an individual finding or a grouped cluster.
 private struct FindingDisplayRow: View {
+    /// Display item representing either a single finding or group.
     let item: FindingDisplayItem
+
+    /// Set of currently selected item IDs.
     let selectedIDs: Set<String>
 
+    /// Layout for the list row.
     var body: some View {
         HStack(spacing: 12) {
             switch item {
@@ -346,9 +408,15 @@ private struct FindingDisplayRow: View {
     }
 }
 
+/// Bottom status bar showing scan status, timestamps, and access warnings.
 private struct ScanFooter: View {
+    /// Model providing scan status and timestamps.
     let model: CleanerModel
+
+    /// Binding to present the access issues sheet.
     @Binding var showingIssues: Bool
+
+    /// Layout for the footer bar.
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if model.isSandboxedBuild {
@@ -384,13 +452,27 @@ private struct ScanFooter: View {
     }
 }
 
+/// Detail view showing metadata, consequences, and commands for a single finding.
 private struct FindingInspector: View {
+    /// Finding item being inspected.
     let item: Finding
+
+    /// Whether the item is currently hidden/ignored.
     let ignored: Bool
+
+    /// Whether the cleaner model is currently performing background work.
     let isBusy: Bool
+
+    /// Action closure to toggle the item's ignored status.
     let toggleIgnored: () -> Void
+
+    /// Action closure called when the cleanup command is copied.
     let commandCopied: () -> Void
+
+    /// Action closure to trigger a refresh of existing findings.
     let refresh: () -> Void
+
+    /// Layout for the single finding inspector.
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
@@ -435,29 +517,40 @@ private struct FindingInspector: View {
     }
 }
 
+/// Detail view for managing and batch-deleting items in a grouped finding.
 private struct GroupInspector: View {
+    /// Finding group being inspected.
     let group: FindingGroup
+
+    /// Bindable reference to the cleaner model for selection and deletion.
     @Bindable var model: CleanerModel
+
+    /// Controls display of the batch deletion confirmation dialog.
     @State private var confirmingDelete = false
 
+    /// Filtered list of items currently selected within this group.
     private var selectedItems: [Finding] {
         model.selectedItems(in: group)
     }
 
+    /// Total bytes calculated across all selected items.
     private var selectedBytes: Int64 {
         selectedItems.reduce(0) { $0 + $1.bytes }
     }
 
+    /// Formatted byte count string for selected items.
     private var selectedSizeText: String {
         ByteCountFormatter.string(fromByteCount: selectedBytes, countStyle: .file)
     }
 
+    /// Combined rm command to delete all selected items in Terminal.
     private var combinedCommand: String {
         let needsSudo = selectedItems.contains { $0.url.path.hasPrefix("/Applications/") || $0.url.path.hasPrefix("/Library/") }
         let paths = selectedItems.map { Finding.quote($0.url.path) }.joined(separator: " ")
         return "\(needsSudo ? "sudo " : "")/bin/rm -rf -- \(paths)"
     }
 
+    /// Layout for the group inspector.
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -538,12 +631,21 @@ private struct GroupInspector: View {
     }
 }
 
+/// Row view representing a single member within a grouped finding inspector.
 private struct GroupMemberRow: View {
+    /// Finding item represented by this row.
     let member: Finding
+
+    /// Binding to the member's checkbox selection state.
     @Binding var isSelected: Bool
+
+    /// Whether the member is currently marked as ignored.
     let isIgnored: Bool
+
+    /// Action closure to toggle the member's ignored state.
     let toggleIgnored: () -> Void
 
+    /// Layout for the group member row.
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Toggle("", isOn: $isSelected)
@@ -583,9 +685,15 @@ private struct GroupMemberRow: View {
     }
 }
 
+/// Reusable section displaying a title and localized explanatory text block.
 private struct DetailSection: View {
+    /// Section header title.
     let title: LocalizedStringResource
+
+    /// Body text explaining the section topic.
     let text: LocalizedStringResource
+
+    /// Layout for the detail text section.
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).font(.headline)
@@ -594,12 +702,24 @@ private struct DetailSection: View {
     }
 }
 
+/// Card displaying a terminal command with one-click copy and usage guidance.
 private struct CommandCard: View {
+    /// Shell command string to display and copy.
     let command: String
+
+    /// Indicates if the command is a package uninstall command.
     var isUninstall = false
+
+    /// Indicates if the command is an inspection command.
     let isInspection: Bool
+
+    /// Callback invoked when the user copies the command.
     let onCopy: () -> Void
+
+    /// State tracking whether the command was recently copied to clipboard.
     @State private var copied = false
+
+    /// Layout for the command display card.
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label(isUninstall ? "How to uninstall" : isInspection ? "Inspect in Terminal" : "Cleanup command", systemImage: "terminal")
@@ -622,12 +742,24 @@ private struct CommandCard: View {
     }
 }
 
+/// Sheet view listing scan access restrictions, sandbox warnings, and path errors.
 private struct ScanIssuesView: View {
+    /// List of diagnostic error messages encountered during scanning.
     let issues: [String]
+
+    /// Count of locations that could not be read.
     let inaccessibleLocations: Int
+
+    /// Flag indicating if the current app build is sandboxed.
     let isSandboxedBuild: Bool
+
+    /// Callback to open macOS System Settings.
     let openSettings: () -> Void
+
+    /// Dismiss action to close the modal sheet.
     @Environment(\.dismiss) private var dismiss
+
+    /// Layout for the scan issues sheet.
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Label("Scan access & coverage", systemImage: "lock.shield").font(.title2.bold())

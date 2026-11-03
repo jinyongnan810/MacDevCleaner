@@ -7,7 +7,9 @@
 
 import XCTest
 
+/// UI test suite validating MacDevCleaner application launch and interface behavior.
 final class MacDevCleanerUITests: XCTestCase {
+    /// Prepares test environment and resets state before each UI test execution.
     override func setUpWithError() throws {
         // Put setup code here. This method is called before the invocation of each test method in the class.
 
@@ -17,10 +19,12 @@ final class MacDevCleanerUITests: XCTestCase {
         // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
     }
 
+    /// Cleans up test state after each UI test method finishes.
     override func tearDownWithError() throws {
         // Put teardown code here. This method is called after the invocation of each test method in the class.
     }
 
+    /// Validates successful application launch and interface presentation.
     @MainActor
     func testExample() throws {
         // UI tests must launch the application that they test.
@@ -32,6 +36,7 @@ final class MacDevCleanerUITests: XCTestCase {
         // https://developer.apple.com/documentation/xcuiautomation
     }
 
+    /// Measures the time required to launch the application.
     @MainActor
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.

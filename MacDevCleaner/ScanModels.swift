@@ -1,8 +1,13 @@
 import Foundation
 
+/// Categories used to group and filter developer storage findings.
 nonisolated enum FindingCategory: String, CaseIterable, Identifiable, Sendable {
     case caches, dependencies, tools, vms, apps
+
+    /// Unique identifier matching the category raw value.
     var id: String { rawValue }
+
+    /// Localized display title for the category.
     var title: LocalizedStringResource {
         switch self {
         case .caches: "Caches & builds"
@@ -13,6 +18,7 @@ nonisolated enum FindingCategory: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// SF Symbol name representing this category.
     var symbol: String {
         switch self {
         case .caches: "shippingbox"
@@ -24,44 +30,102 @@ nonisolated enum FindingCategory: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Represents a discovered developer storage directory or file with size and cleanup details.
 nonisolated struct Finding: Identifiable, Sendable {
+    /// Filesystem URL of the discovered finding.
     let url: URL
+
+    /// Human-readable display title of the finding.
     let title: String
+
+    /// Associated developer toolchain, language, or ecosystem.
     let ecosystem: String
+
+    /// High-level categorization of the finding.
     let category: FindingCategory
+
+    /// Allocated disk space in bytes used by this item.
     let bytes: Int64
+
+    /// Most recent modification date of the directory or file.
     let modified: Date?
+
+    /// Localized description explaining what this directory or file contains.
     let explanation: LocalizedStringResource
+
+    /// Localized explanation of the impact and tradeoffs of removing this item.
     let consequence: LocalizedStringResource
+
+    /// Optional toolchain uninstall command for cleanly removing this item.
     let uninstallCommand: String?
+
+    /// Optional safe command to inspect the contents in Terminal.
     let inspectionCommand: String?
+
+    /// Identifier used to group related findings together.
     var groupKey: String?
+
+    /// Display title of the group this finding belongs to.
     var groupTitle: String?
+
+    /// Indicates whether access restrictions prevented full measurement.
     var incomplete: Bool
+
+    /// Indicates whether the finding could not be rechecked during refresh.
     var measurementIsStale = false
+
+    /// URL of the disk volume hosting this finding.
     var volumeURL: URL?
+
+    /// Unique identifier based on the file path.
     var id: String { url.path }
+
+    /// Effective shell command to inspect or delete this finding.
     var command: String { uninstallCommand ?? inspectionCommand ?? "/bin/rm -rf -- \(Self.quote(url.path))" }
+
+    /// Wraps a file path in single quotes with escaped inner quotes for shell safety.
     static func quote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+
+    /// Formatted human-readable string representation of the finding's size.
     var displaySize: String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
 }
 
+/// Groups multiple related findings under a single batch entity.
 nonisolated struct FindingGroup: Identifiable, Sendable {
+    /// Unique identifier for the finding group.
     let id: String
+
+    /// Human-readable display title for the group.
     let title: String
+
+    /// Toolchain or developer ecosystem associated with the group.
     let ecosystem: String
+
+    /// Category shared by the items in this group.
     let category: FindingCategory
+
+    /// Localized high-level description of what this group contains.
     let explanation: LocalizedStringResource
+
+    /// Localized impact and tradeoffs of removing items in this group.
     let consequence: LocalizedStringResource
+
+    /// Individual findings contained within this group.
     let items: [Finding]
+
+    /// Total aggregated disk space in bytes for all items in the group.
     var totalBytes: Int64 { items.reduce(0) { $0 + $1.bytes } }
+
+    /// Formatted human-readable string of the group's total size.
     var displaySize: String { ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file) }
 }
 
+/// Unified display model representing either a single finding or a grouped set.
 nonisolated enum FindingDisplayItem: Identifiable, Sendable {
     case single(Finding)
     case group(FindingGroup)
 
+    /// Unique identifier for list display and selection.
     var id: String {
         switch self {
         case let .single(finding): finding.id
@@ -69,6 +133,7 @@ nonisolated enum FindingDisplayItem: Identifiable, Sendable {
         }
     }
 
+    /// Size in bytes for sorting and display.
     var bytes: Int64 {
         switch self {
         case let .single(finding): finding.bytes
@@ -77,35 +142,75 @@ nonisolated enum FindingDisplayItem: Identifiable, Sendable {
     }
 }
 
+/// Aggregated results and diagnostic metrics produced by a storage scan.
 nonisolated struct ScanReport: Sendable {
+    /// Discovered developer storage items found during the scan.
     var findings: [Finding] = []
+
+    /// Diagnostic error messages encountered during scanning.
     var issues: [String] = []
+
+    /// Total number of directories traversed during the scan.
     var directoriesVisited = 0
+
+    /// Count of filesystem locations that could not be accessed.
     var inaccessibleLocations = 0
+
+    /// Number of disk volumes evaluated during the scan.
     var volumesScanned = 0
 }
 
+/// Snapshot of active scanning progress reported to the UI.
 nonisolated struct ScanProgress: Sendable {
+    /// Current directory path being inspected.
     var path = "/"
+
+    /// Number of directories traversed so far.
     var directoriesVisited = 0
+
+    /// Number of developer storage findings discovered so far.
     var findingsCount = 0
 }
 
 /// Filesystem work is isolated from the UI. Never launches a process or modifies scanned files.
 actor StorageScanner {
+    /// Default file manager used for filesystem queries.
     private let manager = FileManager.default
+
+    /// Resource keys requested when measuring file attributes and sizes.
     private let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey,
                                              .fileAllocatedSizeKey, .fileSizeKey, .contentModificationDateKey]
+
+    /// Detection rule matching specific directory patterns to developer storage categories.
     private struct Rule {
+        /// Relative path suffix or specific pattern to match.
         let path: String
+
+        /// Human-readable name for matched storage items.
         let title: String
+
+        /// Associated toolchain or developer environment.
         let ecosystem: String
+
+        /// High-level category assigned to matched items.
         var category: FindingCategory = .caches
+
+        /// Specific CLI uninstall command to cleanly remove the item.
         var uninstallCommand: String?
+
+        /// Inspection command to view or evaluate the item.
         var command: String?
+
+        /// Grouping key to cluster similar items together.
         var groupKey: String?
+
+        /// Display title of the cluster group.
         var groupTitle: String?
+
+        /// Custom explanation for what the matched item is.
         var explanation: LocalizedStringResource?
+
+        /// Custom consequence for removing the matched item.
         var consequence: LocalizedStringResource?
     }
 
@@ -122,7 +227,7 @@ actor StorageScanner {
         return try await scan(roots: roots, progress: progress)
     }
 
-    // The explicit roots entry point also supports isolated filesystem verification.
+    /// Scans specified root URLs and compiles a sorted storage scan report.
     func scan(roots: [URL], progress: @Sendable (ScanProgress) async -> Void) async throws -> ScanReport {
         var report = ScanReport()
         var measured: Set<String> = []
@@ -186,6 +291,7 @@ actor StorageScanner {
         return report
     }
 
+    /// Preserves an uncheckable finding as stale and records an access issue.
     private func retainStale(_ finding: Finding, in report: inout ScanReport) {
         var previous = finding
         previous.measurementIsStale = true
@@ -194,6 +300,7 @@ actor StorageScanner {
         report.issues.append("Could not recheck \(finding.url.path). The previous size is retained; the location may be inaccessible, changed, or on an unavailable drive.")
     }
 
+    /// Known cache and data rules located within user home directories.
     private let homeRules: [Rule] = [Rule(path: "Library/Developer/Xcode/DerivedData", title: "Xcode Derived Data", ecosystem: "Xcode"),
                                      Rule(path: "Library/Caches/org.swift.swiftpm", title: "Swift package cache", ecosystem: "Swift"),
                                      Rule(path: ".npm/_cacache", title: "npm download cache", ecosystem: "Node.js"),
@@ -224,6 +331,7 @@ actor StorageScanner {
         return [".git", ".svn", ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd", "Backups.backupdb"].contains(url.lastPathComponent)
     }
 
+    /// Evaluates directory URLs against all supported developer rules.
     private func rule(for url: URL) -> Rule? {
         if let rule = homeRules.first(where: { url.path.hasSuffix("/" + $0.path) }) { return rule }
         if let cli = cliRule(for: url) { return cli }
@@ -240,6 +348,7 @@ actor StorageScanner {
         }
     }
 
+    /// Detects third-party application support folders in Library directories.
     private func appSupportRule(for url: URL) -> Rule? {
         let name = url.lastPathComponent
         let parentPath = url.deletingLastPathComponent().path
@@ -261,6 +370,7 @@ actor StorageScanner {
                     consequence: "If \(name) is still installed, deleting this resets its local settings and data. If the app was already removed, this leftover support folder can be deleted.")
     }
 
+    /// Parses simulator runtime bundle identifiers into platform names and version labels.
     private func parseSimulatorRuntime(_ runtime: String?) -> (platform: String, label: String) {
         guard let runtime, !runtime.isEmpty else { return ("Simulator", "") }
         let raw = runtime.components(separatedBy: "SimRuntime.").last ?? runtime
@@ -278,6 +388,7 @@ actor StorageScanner {
         return (platform, label)
     }
 
+    /// Detects virtual machine images, simulator devices, and local AI model weights.
     private func vmAndModelRule(for url: URL) -> Rule? {
         let path = url.path
         let name = url.lastPathComponent
@@ -420,6 +531,7 @@ actor StorageScanner {
         return nil
     }
 
+    /// Normalizes programming language and tool names for display.
     private func displayLanguageName(_ raw: String) -> String {
         switch raw.lowercased() {
         case "node", "nodejs": "Node.js"
@@ -445,6 +557,7 @@ actor StorageScanner {
         }
     }
 
+    /// Detects version-managed language toolchains and SDK installations.
     private func languageVersionRule(for url: URL) -> Rule? {
         let path = url.path
         let name = url.lastPathComponent
@@ -649,6 +762,7 @@ actor StorageScanner {
         return nil
     }
 
+    /// Detects package manager CLIs, global packages, and developer tools.
     private func cliRule(for url: URL) -> Rule? {
         let path = url.path
         let name = url.lastPathComponent
@@ -765,6 +879,7 @@ actor StorageScanner {
         return nil
     }
 
+    /// Recursively enumerates a directory hierarchy matching developer storage rules.
     private func scanTree(_ root: URL, measured: inout Set<String>, report: inout ScanReport,
                           progress: @Sendable (ScanProgress) async -> Void) async throws
     {
@@ -826,6 +941,7 @@ actor StorageScanner {
         }
     }
 
+    /// Matches project-level build output and dependency directories.
     private func projectRule(_ url: URL) -> Rule? {
         let projectName = url.deletingLastPathComponent().lastPathComponent
         switch url.lastPathComponent {
@@ -866,6 +982,7 @@ actor StorageScanner {
         }
     }
 
+    /// Calculates total directory allocation and appends a finding to the report.
     private func record(_ url: URL, rule: Rule, measured: inout Set<String>, report: inout ScanReport) throws {
         let path = url.standardizedFileURL.path
         guard !measured.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) else { return }
@@ -921,12 +1038,14 @@ actor StorageScanner {
                                        volumeURL: try? url.resourceValues(forKeys: [.volumeURLKey]).volume))
     }
 
+    /// Determines whether a URL points to an application bundle in an Applications directory.
     private func isApplicationBundle(_ url: URL) -> Bool {
         guard url.pathExtension.lowercased() == "app", !url.path.hasPrefix("/System/") else { return false }
         let parentPath = url.deletingLastPathComponent().path
         return parentPath == "/Applications" || parentPath.hasSuffix("/Applications")
     }
 
+    /// Discovers and groups an app bundle with its associated library and cache folders.
     private func recordApplicationBundle(_ appURL: URL, root: URL, measured: inout Set<String>, report: inout ScanReport) throws {
         let infoURL = appURL.appendingPathComponent("Contents/Info.plist")
         let plist = NSDictionary(contentsOf: infoURL) as? [String: Any]
@@ -1034,6 +1153,7 @@ actor StorageScanner {
         }
     }
 
+    /// Scans Ollama manifest files to record individual local AI model findings.
     private func recordOllamaModels(at modelsDir: URL, measured: inout Set<String>, report: inout ScanReport) throws {
         let manifestsRoot = modelsDir.appendingPathComponent("manifests", isDirectory: true)
         var recordedAny = false
@@ -1060,6 +1180,7 @@ actor StorageScanner {
         }
     }
 
+    /// Parses an Ollama model manifest to compute actual layer blob disk usage.
     private func measureOllamaManifest(_ manifestURL: URL) throws -> Finding? {
         let path = manifestURL.standardizedFileURL.path
         guard let markerRange = path.range(of: "/.ollama/models/manifests/") else { return nil }

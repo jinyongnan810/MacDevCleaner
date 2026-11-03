@@ -1,7 +1,9 @@
 import SwiftUI
 
+/// Main entry point for the MacDevCleaner application.
 @main
 struct MacDevCleanerApp: App {
+    /// Configures the main application window and its default sizing.
     var body: some Scene {
         WindowGroup {
             ContentView()
