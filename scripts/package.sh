@@ -2,7 +2,8 @@
 # Fully automated packaging script for MacDevCleaner.
 # Builds the Release scheme, exports Developer ID application,
 # creates and signs the DMG, notarizes with Apple Notary Service,
-# staples the ticket, validates Gatekeeper compliance, and generates sha256.
+# staples the ticket, validates Gatekeeper compliance, generates sha256,
+# and optionally creates a GitHub Release and uploads assets via gh CLI.
 set -euo pipefail
 
 # Use standard tool paths consistently
@@ -22,6 +23,16 @@ team_id="${MACDEV_TEAM_ID:-6W8B6G9KYD}"
 force="${FORCE:-0}"
 skip_notarize=0
 
+# GitHub Release options
+create_release="${MACDEV_GH_RELEASE:-0}"
+release_tag=""
+release_title=""
+release_notes=""
+release_notes_file=""
+is_draft=0
+is_prerelease=0
+release_url=""
+
 usage() {
     cat << 'EOF'
 Usage: scripts/package.sh [options]
@@ -39,12 +50,20 @@ Options:
                               (default: Developer ID Application: JIN YONGNAN (6W8B6G9KYD))
   -t, --team-id <id>          Developer Team ID
                               (default: 6W8B6G9KYD)
-  -f, --force                 Overwrite existing output in dist/
+  -f, --force                 Overwrite existing output in dist/ (or update existing GitHub release)
   --skip-notarize             Build and package signed DMG without notarization
+  -r, --release               Create GitHub release & upload DMG + checksum via gh CLI
+  --tag <tag>                 GitHub release tag (default: version from project, e.g. 1.0.2)
+  --title <title>             GitHub release title (default: version)
+  --notes <text>              Custom GitHub release notes
+  --notes-file <file>         Read GitHub release notes from file
+  --draft                     Create GitHub release as draft
+  --prerelease                Mark GitHub release as prerelease
   -h, --help                  Show this help message
 
 Environment variables (optional overrides):
-  MACDEV_P8_PATH, MACDEV_KEY_ID, MACDEV_ISSUER_ID, MACDEV_SIGN_IDENTITY, MACDEV_TEAM_ID, FORCE
+  MACDEV_P8_PATH, MACDEV_KEY_ID, MACDEV_ISSUER_ID, MACDEV_SIGN_IDENTITY, MACDEV_TEAM_ID,
+  MACDEV_GH_RELEASE, FORCE
 EOF
     exit 0
 }
@@ -79,6 +98,34 @@ while [[ $# -gt 0 ]]; do
             skip_notarize=1
             shift
             ;;
+        -r|--release|--gh-release)
+            create_release=1
+            shift
+            ;;
+        --tag)
+            release_tag="$2"
+            shift 2
+            ;;
+        --title)
+            release_title="$2"
+            shift 2
+            ;;
+        --notes)
+            release_notes="$2"
+            shift 2
+            ;;
+        --notes-file)
+            release_notes_file="$2"
+            shift 2
+            ;;
+        --draft)
+            is_draft=1
+            shift
+            ;;
+        --prerelease)
+            is_prerelease=1
+            shift
+            ;;
         -h|--help)
             usage
             ;;
@@ -93,6 +140,11 @@ info "Verifying required tools..."
 for tool in xcodebuild xcrun codesign hdiutil security spctl shasum plutil; do
     command -v "$tool" >/dev/null 2>&1 || fail "Required tool '$tool' is not available in PATH."
 done
+
+if [[ "$create_release" -eq 1 ]]; then
+    command -v gh >/dev/null 2>&1 || fail "GitHub CLI (gh) is required for --release. Install with 'brew install gh'."
+    gh auth status >/dev/null 2>&1 || fail "GitHub CLI is not authenticated. Run 'gh auth login' first."
+fi
 
 # 2. Check Developer ID signing identity in Keychain
 info "Verifying Developer ID signing identity in Keychain..."
@@ -201,7 +253,46 @@ fi
 info "Generating SHA-256 checksum..."
 shasum -a 256 "$target_dmg" > "$target_dmg.sha256"
 
-# 11. Final Summary
+# 11. Create GitHub Release & Upload Assets (Optional)
+if [[ "$create_release" -eq 1 ]]; then
+    info "Publishing GitHub Release via gh CLI..."
+    release_tag="${release_tag:-$version}"
+    release_title="${release_title:-$version}"
+
+    gh_args=("$release_tag" "$target_dmg" "$target_dmg.sha256" "--title" "$release_title")
+
+    if [[ -n "$release_notes_file" ]]; then
+        gh_args+=("-F" "$release_notes_file")
+    elif [[ -n "$release_notes" ]]; then
+        gh_args+=("--notes" "$release_notes")
+    else
+        gh_args+=("--generate-notes")
+    fi
+
+    if [[ "$is_draft" -eq 1 ]]; then
+        gh_args+=("--draft")
+    fi
+
+    if [[ "$is_prerelease" -eq 1 ]]; then
+        gh_args+=("--prerelease")
+    fi
+
+    if gh release view "$release_tag" >/dev/null 2>&1; then
+        if [[ "$force" -eq 1 ]]; then
+            echo "Release '$release_tag' already exists on GitHub. Updating release assets (--clobber)..."
+            gh release upload "$release_tag" "$target_dmg" "$target_dmg.sha256" --clobber
+        else
+            fail "GitHub Release '$release_tag' already exists. Increment version in Xcode, or pass --force (-f) to update release assets."
+        fi
+    else
+        echo "Creating GitHub Release '$release_tag' and uploading release assets..."
+        gh release create "${gh_args[@]}"
+    fi
+
+    release_url=$(gh release view "$release_tag" --json url -q .url 2>/dev/null || echo "https://github.com/jinyongnan810/MacDevCleaner/releases/tag/$release_tag")
+fi
+
+# 12. Final Summary
 checksum=$(cat "$target_dmg.sha256")
 dmg_size=$(ls -lh "$target_dmg" | awk '{print $5}')
 
@@ -214,5 +305,8 @@ if [[ "$skip_notarize" -eq 0 ]]; then
     printf '  Status:   Signed, Notarized, and Stapled\n'
 else
     printf '  Status:   Signed (Notarization skipped)\n'
+fi
+if [[ "$create_release" -eq 1 && -n "$release_url" ]]; then
+    printf '  GitHub:   %s\n' "$release_url"
 fi
 printf '\033[1;32m==================================================\033[0m\n\n'

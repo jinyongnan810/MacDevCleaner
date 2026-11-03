@@ -35,7 +35,29 @@ Install [asc](https://github.com/rudrankriyam/App-Store-Connect-CLI), then:
 
 ## Automated release (recommended)
 
-Run the automated packaging script from the repository root:
+### Package & Publish to GitHub
+
+To run the complete pipeline and publish directly to GitHub Releases via `gh` CLI:
+
+```sh
+make release
+# or directly:
+./scripts/package.sh --release
+```
+
+This will:
+1. Verify local signing certificate, App Store Connect API credentials, and `gh` authentication.
+2. Archive the project with the `Release` build configuration.
+3. Export the Developer ID–signed app with Hardened Runtime enabled.
+4. Package the app into a signed disk image (`dist/MacDevCleaner-<version>-<build>.dmg`).
+5. Submit the DMG to Apple Notary Service (`xcrun notarytool`) and wait for approval.
+6. Staple the notarization ticket to the DMG and validate Gatekeeper compliance (`spctl`).
+7. Compute the SHA-256 checksum file (`dist/MacDevCleaner-<version>-<build>.dmg.sha256`).
+8. Create the GitHub Release (e.g. `1.0.3`) using `gh release create`, generate release notes automatically, and upload the notarized DMG and checksum assets.
+
+### Package only (local DMG)
+
+To run the pipeline and produce the notarized, stapled DMG locally without publishing to GitHub:
 
 ```sh
 make package
@@ -43,31 +65,25 @@ make package
 ./scripts/package.sh
 ```
 
-The script runs the complete release pipeline:
-1. Verifies local signing certificate and App Store Connect API credentials.
-2. Archives the project with the `Release` build configuration.
-3. Exports the Developer ID–signed app with Hardened Runtime enabled.
-4. Packages the app into a signed disk image (`dist/MacDevCleaner-<version>-<build>.dmg`).
-5. Submits the DMG to the Apple Notary Service (`xcrun notarytool`) and waits for approval.
-6. Staples the notarization ticket to the DMG and validates Gatekeeper compliance (`spctl`).
-7. Computes and writes the SHA-256 checksum file (`dist/MacDevCleaner-<version>-<build>.dmg.sha256`).
-
 ### Script options and overrides
 
 Defaults are configured for local release (`/Users/kin/Documents/MacDevCleaner.p8`, Key ID `Z962439KCL`, Issuer ID `86621a93-af27-4c2a-9740-e91edb76fc3f`), and can be customized via flags or environment variables:
 
 ```sh
-# Overwrite existing release in dist/
-make package ARGS="--force"
+# Overwrite existing release in dist/ and update GitHub assets
+make release ARGS="--force"
+
+# Create as a draft release on GitHub
+make release ARGS="--draft"
 
 # Build and package signed DMG without waiting for Apple notarization
 make package ARGS="--skip-notarize"
 
-# Specify custom key path or credentials
-./scripts/package.sh \
-  --key-path /path/to/AuthKey.p8 \
-  --key-id YOUR_KEY_ID \
-  --issuer-id YOUR_ISSUER_ID \
+# Specify custom tag or release notes
+./scripts/package.sh --release \
+  --tag "1.0.3" \
+  --title "1.0.3" \
+  --notes "Release notes text..." \
   --force
 ```
 
