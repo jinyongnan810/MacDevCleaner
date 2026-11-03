@@ -156,10 +156,6 @@ actor StorageScanner {
                                      Rule(path: "Library/Caches/Homebrew", title: "Homebrew downloads", ecosystem: "Homebrew"),
                                      Rule(path: ".gradle/caches", title: "Gradle cache", ecosystem: "Java / Kotlin"),
                                      Rule(path: ".cargo/registry", title: "Cargo registry", ecosystem: "Rust"),
-                                     Rule(path: ".nvm/versions", title: "Node.js versions", ecosystem: "nvm", category: .tools),
-                                     Rule(path: ".pyenv/versions", title: "Python versions", ecosystem: "pyenv", category: .tools),
-                                     Rule(path: ".rustup/toolchains", title: "Rust toolchains", ecosystem: "Rust", category: .tools),
-                                     Rule(path: "Library/Python", title: "User Python packages", ecosystem: "Python", category: .tools),
                                      Rule(path: ".aws/cli/cache", title: "AWS CLI credential & response cache", ecosystem: "AWS CLI"),
                                      Rule(path: ".aws/sso/cache", title: "AWS SSO token cache", ecosystem: "AWS CLI"),
                                      Rule(path: "Library/Containers/com.docker.docker/Data/vms", title: "Docker virtual machines", ecosystem: "Docker", category: .tools, command: "docker system df -v"),
@@ -179,16 +175,244 @@ actor StorageScanner {
     private func rule(for url: URL) -> Rule? {
         if let rule = homeRules.first(where: { url.path.hasSuffix("/" + $0.path) }) { return rule }
         if let cli = cliRule(for: url) { return cli }
+        if let lang = languageVersionRule(for: url) { return lang }
         switch url.path {
         case "/Library/Developer/CommandLineTools":
             return Rule(path: "", title: "Apple Command Line Tools", ecosystem: "Apple CLI", category: .tools,
                         uninstallCommand: "sudo /bin/rm -rf -- \(Finding.quote(url.path))",
                         explanation: "Apple's standalone command line developer tools (clang, git, make, SDKs).",
                         consequence: "Uninstalling removes command-line compilers and SDKs outside Xcode. Run xcode-select --install to reinstall if needed.")
-        case "/Library/Frameworks/Python.framework":
-            return Rule(path: "", title: "Python framework", ecosystem: "Python", category: .tools)
         default: return projectRule(url)
         }
+    }
+
+    private func displayLanguageName(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "node", "nodejs": "Node.js"
+        case "python", "cpython": "Python"
+        case "ruby": "Ruby"
+        case "rust": "Rust"
+        case "go", "golang": "Go"
+        case "java": "Java"
+        case "kotlin": "Kotlin"
+        case "gradle": "Gradle"
+        case "maven": "Maven"
+        case "scala": "Scala"
+        case "swift": "Swift"
+        case "flutter": "Flutter"
+        case "dart": "Dart"
+        case "deno": "Deno"
+        case "bun": "Bun"
+        case "zig": "Zig"
+        case "php": "PHP"
+        case "elixir": "Elixir"
+        case "erlang": "Erlang"
+        default: raw
+        }
+    }
+
+    private func languageVersionRule(for url: URL) -> Rule? {
+        let path = url.path
+        let name = url.lastPathComponent
+        let parentURL = url.deletingLastPathComponent()
+        let parentPath = parentURL.path
+        let parentName = parentURL.lastPathComponent
+        let grandparentPath = parentURL.deletingLastPathComponent().path
+
+        // mise: ~/.local/share/mise/installs/<tool>/<version> or ~/Library/Application Support/mise/installs/<tool>/<version>
+        if grandparentPath.hasSuffix("/mise/installs") {
+            let lang = displayLanguageName(parentName)
+            let spec = "\(parentName)@\(name)"
+            return Rule(path: "", title: "\(lang) \(name)", ecosystem: "mise (\(lang))", category: .tools,
+                        uninstallCommand: "mise uninstall \(Finding.quote(spec))",
+                        explanation: "Installed \(lang) version \(name) managed by mise.",
+                        consequence: "Uninstalling removes \(spec) from mise. Projects pinned to this version will need to reinstall it or use another version.")
+        }
+
+        // asdf: ~/.asdf/installs/<tool>/<version>
+        if grandparentPath.hasSuffix("/.asdf/installs") {
+            let lang = displayLanguageName(parentName)
+            return Rule(path: "", title: "\(lang) \(name)", ecosystem: "asdf (\(lang))", category: .tools,
+                        uninstallCommand: "asdf uninstall \(Finding.quote(parentName)) \(Finding.quote(name))",
+                        explanation: "Installed \(lang) version \(name) managed by asdf.",
+                        consequence: "Uninstalling removes \(parentName) \(name) from asdf. Projects referencing it in .tool-versions will require reinstallation.")
+        }
+
+        // nvm: ~/.nvm/versions/node/<version> or ~/.nvm/versions/io.js/<version>
+        if parentPath.hasSuffix("/.nvm/versions/node") || parentPath.hasSuffix("/.nvm/versions/io.js") {
+            return Rule(path: "", title: "Node.js \(name)", ecosystem: "nvm (Node.js)", category: .tools,
+                        uninstallCommand: "nvm uninstall \(Finding.quote(name))",
+                        explanation: "Installed Node.js runtime \(name) and its global npm packages managed by nvm.",
+                        consequence: "Uninstalling removes Node.js \(name) and any global npm packages installed under this version.")
+        }
+
+        // fnm: ~/Library/Application Support/fnm/node-versions/<version>, ~/.local/share/fnm/node-versions/<version>, ~/.fnm/node-versions/<version>
+        if parentPath.hasSuffix("/fnm/node-versions") || parentPath.hasSuffix("/.fnm/node-versions") {
+            return Rule(path: "", title: "Node.js \(name)", ecosystem: "fnm (Node.js)", category: .tools,
+                        uninstallCommand: "fnm uninstall \(Finding.quote(name))",
+                        explanation: "Installed Node.js runtime \(name) managed by Fast Node Manager (fnm).",
+                        consequence: "Uninstalling removes Node.js \(name) from fnm.")
+        }
+
+        // n (Node version manager): /usr/local/n/versions/node/<version>
+        if parentPath.hasSuffix("/n/versions/node") {
+            return Rule(path: "", title: "Node.js \(name)", ecosystem: "n (Node.js)", category: .tools,
+                        uninstallCommand: "n rm \(Finding.quote(name))",
+                        explanation: "Installed Node.js runtime \(name) managed by n.",
+                        consequence: "Uninstalling removes Node.js \(name) from n.")
+        }
+
+        // Volta: ~/.volta/tools/image/<runtime>/<version>
+        if grandparentPath.hasSuffix("/.volta/tools/image"), ["node", "npm", "yarn", "pnpm"].contains(parentName) {
+            let lang = displayLanguageName(parentName)
+            return Rule(path: "", title: "\(lang) \(name)", ecosystem: "Volta (\(lang))", category: .tools,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Installed \(lang) \(name) toolchain image managed by Volta.",
+                        consequence: "Removing this directory deletes the cached \(lang) \(name) runtime from Volta.")
+        }
+
+        // pyenv: ~/.pyenv/versions/<version>
+        if parentPath.hasSuffix("/.pyenv/versions") {
+            return Rule(path: "", title: "Python \(name)", ecosystem: "pyenv (Python)", category: .tools,
+                        uninstallCommand: "pyenv uninstall -f \(Finding.quote(name))",
+                        explanation: "Installed Python version or virtualenv (\(name)) managed by pyenv.",
+                        consequence: "Uninstalling removes Python \(name) and all site-packages installed in it.")
+        }
+
+        // uv Python installations: ~/.local/share/uv/python/<version> or ~/Library/Application Support/uv/python/<version>
+        if parentPath.hasSuffix("/uv/python") {
+            return Rule(path: "", title: "Python \(name)", ecosystem: "uv (Python)", category: .tools,
+                        uninstallCommand: "uv python uninstall \(Finding.quote(name))",
+                        explanation: "Standalone Python toolchain (\(name)) managed by uv.",
+                        consequence: "Uninstalling removes this uv-managed Python version. Virtual environments linking to it will require reinstallation.")
+        }
+
+        // Conda / Miniconda / Miniforge / Anaconda environments
+        if parentPath.hasSuffix("/miniconda3/envs") || parentPath.hasSuffix("/anaconda3/envs")
+            || parentPath.hasSuffix("/miniforge3/envs") || parentPath.hasSuffix("/mambaforge/envs")
+            || parentPath.hasSuffix("/.conda/envs")
+        {
+            return Rule(path: "", title: "Conda env: \(name)", ecosystem: "Conda (Python)", category: .tools,
+                        uninstallCommand: "conda env remove -n \(Finding.quote(name))",
+                        explanation: "Isolated Conda environment (\(name)) with its Python interpreter and native packages.",
+                        consequence: "Removing this environment deletes all packages installed inside \(name).")
+        }
+
+        // Python.framework per-version in /Library/Frameworks/Python.framework/Versions/<version>
+        if parentPath == "/Library/Frameworks/Python.framework/Versions" || parentPath.hasSuffix("/Python.framework/Versions"),
+           name != "Current"
+        {
+            return Rule(path: "", title: "Python \(name) (Framework)", ecosystem: "Python", category: .tools,
+                        uninstallCommand: "sudo /bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "System-wide Python \(name) framework installation in /Library/Frameworks.",
+                        consequence: "Removing this deletes Python \(name) and its framework site-packages.")
+        }
+
+        // User Python packages per-version in ~/Library/Python/<version>
+        if parentPath.hasSuffix("/Library/Python") {
+            return Rule(path: "", title: "Python \(name) user packages", ecosystem: "Python", category: .tools,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "User-level pip packages installed for Python \(name).",
+                        consequence: "Removing this deletes user-scoped Python \(name) packages and scripts.")
+        }
+
+        // rbenv: ~/.rbenv/versions/<version>
+        if parentPath.hasSuffix("/.rbenv/versions") {
+            return Rule(path: "", title: "Ruby \(name)", ecosystem: "rbenv (Ruby)", category: .tools,
+                        uninstallCommand: "rbenv uninstall -f \(Finding.quote(name))",
+                        explanation: "Installed Ruby version \(name) and its gems managed by rbenv.",
+                        consequence: "Uninstalling removes Ruby \(name) and all gems installed under it.")
+        }
+
+        // RVM: ~/.rvm/rubies/<version>
+        if parentPath.hasSuffix("/.rvm/rubies") {
+            return Rule(path: "", title: "Ruby \(name)", ecosystem: "RVM (Ruby)", category: .tools,
+                        uninstallCommand: "rvm remove \(Finding.quote(name))",
+                        explanation: "Installed Ruby runtime (\(name)) managed by RVM.",
+                        consequence: "Uninstalling removes Ruby \(name) and its associated gemsets.")
+        }
+
+        // chruby / ruby-install: ~/.rubies/<version>
+        if parentPath.hasSuffix("/.rubies") {
+            return Rule(path: "", title: "Ruby \(name)", ecosystem: "chruby (Ruby)", category: .tools,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Installed Ruby runtime (\(name)) in ~/.rubies.",
+                        consequence: "Removing this deletes Ruby \(name) and its gems.")
+        }
+
+        // rustup toolchains: ~/.rustup/toolchains/<toolchain>
+        if parentPath.hasSuffix("/.rustup/toolchains") {
+            return Rule(path: "", title: "Rust \(name)", ecosystem: "rustup (Rust)", category: .tools,
+                        uninstallCommand: "rustup toolchain uninstall \(Finding.quote(name))",
+                        explanation: "Installed Rust compiler toolchain (\(name)) and components managed by rustup.",
+                        consequence: "Uninstalling removes the \(name) toolchain from rustup.")
+        }
+
+        // SDKMAN!: ~/.sdkman/candidates/<candidate>/<version>
+        if grandparentPath.hasSuffix("/.sdkman/candidates"), name != "current" {
+            let lang = displayLanguageName(parentName)
+            return Rule(path: "", title: "\(lang) \(name)", ecosystem: "SDKMAN (\(lang))", category: .tools,
+                        uninstallCommand: "sdk uninstall \(Finding.quote(parentName)) \(Finding.quote(name))",
+                        explanation: "Installed \(lang) version \(name) managed by SDKMAN!.",
+                        consequence: "Uninstalling removes \(parentName) \(name) from SDKMAN!.")
+        }
+
+        // Java JDK bundles: /Library/Java/JavaVirtualMachines/<jdk> or ~/Library/Java/JavaVirtualMachines/<jdk>
+        if parentPath.hasSuffix("/Library/Java/JavaVirtualMachines") {
+            let needsSudo = path.hasPrefix("/Library/")
+            let jdkName = name.replacingOccurrences(of: ".jdk", with: "")
+            return Rule(path: "", title: "JDK \(jdkName)", ecosystem: "Java JDK", category: .tools,
+                        uninstallCommand: "\(needsSudo ? "sudo " : "")/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Installed Java Development Kit bundle (\(name)).",
+                        consequence: "Removing this deletes the \(jdkName) JDK bundle.")
+        }
+
+        // goenv & Go SDKs: ~/.goenv/versions/<version> or ~/sdk/go<version>
+        if parentPath.hasSuffix("/.goenv/versions") {
+            return Rule(path: "", title: "Go \(name)", ecosystem: "goenv (Go)", category: .tools,
+                        uninstallCommand: "goenv uninstall -f \(Finding.quote(name))",
+                        explanation: "Installed Go toolchain \(name) managed by goenv.",
+                        consequence: "Uninstalling removes Go \(name) from goenv.")
+        }
+        if parentPath.hasSuffix("/sdk"), name.hasPrefix("go"), name.count > 2 {
+            let ver = String(name.dropFirst(2))
+            return Rule(path: "", title: "Go \(ver)", ecosystem: "Go SDK", category: .tools,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path))",
+                        explanation: "Downloaded Go SDK version \(ver) in ~/sdk.",
+                        consequence: "Removing this deletes the Go \(ver) SDK.")
+        }
+
+        // fvm (Flutter Version Management): ~/fvm/versions/<version> or ~/.fvm/versions/<version>
+        if parentPath.hasSuffix("/fvm/versions") || parentPath.hasSuffix("/.fvm/versions") {
+            return Rule(path: "", title: "Flutter \(name)", ecosystem: "fvm (Flutter)", category: .tools,
+                        uninstallCommand: "fvm remove \(Finding.quote(name))",
+                        explanation: "Installed Flutter SDK version \(name) managed by fvm.",
+                        consequence: "Uninstalling removes Flutter \(name) from fvm.")
+        }
+
+        // swiftenv & swiftly: ~/.swiftenv/versions/<version>, ~/.local/share/swiftly/toolchains/<version>
+        if parentPath.hasSuffix("/.swiftenv/versions") {
+            return Rule(path: "", title: "Swift \(name)", ecosystem: "swiftenv (Swift)", category: .tools,
+                        uninstallCommand: "swiftenv uninstall \(Finding.quote(name))",
+                        explanation: "Installed Swift toolchain \(name) managed by swiftenv.",
+                        consequence: "Uninstalling removes Swift \(name) from swiftenv.")
+        }
+        if parentPath.hasSuffix("/swiftly/toolchains") {
+            return Rule(path: "", title: "Swift \(name)", ecosystem: "swiftly (Swift)", category: .tools,
+                        uninstallCommand: "swiftly uninstall \(Finding.quote(name))",
+                        explanation: "Installed Swift toolchain \(name) managed by swiftly.",
+                        consequence: "Uninstalling removes Swift \(name) from swiftly.")
+        }
+
+        // phpenv: ~/.phpenv/versions/<version>
+        if parentPath.hasSuffix("/.phpenv/versions") {
+            return Rule(path: "", title: "PHP \(name)", ecosystem: "phpenv (PHP)", category: .tools,
+                        uninstallCommand: "/bin/rm -rf -- \(Finding.quote(path)) && phpenv rehash",
+                        explanation: "Installed PHP version \(name) managed by phpenv.",
+                        consequence: "Removing this deletes PHP \(name) from phpenv.")
+        }
+
+        return nil
     }
 
     private func cliRule(for url: URL) -> Rule? {
