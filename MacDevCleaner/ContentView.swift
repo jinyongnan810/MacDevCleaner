@@ -269,7 +269,7 @@ private struct FindingRow: View {
             Spacer(minLength: 4)
             VStack(alignment: .trailing, spacing: 5) {
                 Text(item.displaySize).font(.subheadline.weight(.semibold)).monospacedDigit()
-                Text(item.measurementIsStale ? "Needs recheck" : item.incomplete ? "Partial size" : item.inspectionCommand != nil ? "Review usage" : "Regenerable")
+                Text(item.measurementIsStale ? "Needs recheck" : item.incomplete ? "Partial size" : item.uninstallCommand != nil ? "Uninstallable" : item.inspectionCommand != nil ? "Review usage" : "Regenerable")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }.padding(.vertical, 8)
@@ -349,7 +349,7 @@ private struct FindingInspector: View {
                 if item.measurementIsStale {
                     DetailSection(title: "Location couldn’t be rechecked", text: "The previous size is shown. Reconnect the drive or restore access, then refresh. Cleanup commands are hidden until the location can be checked again.")
                 } else {
-                    CommandCard(command: item.command, isInspection: item.inspectionCommand != nil, onCopy: commandCopied)
+                    CommandCard(command: item.command, isUninstall: item.uninstallCommand != nil, isInspection: item.inspectionCommand != nil, onCopy: commandCopied)
                         .id(item.id)
                 }
                 Button("Refresh results", systemImage: "arrow.clockwise", action: refresh)
@@ -378,17 +378,18 @@ private struct DetailSection: View {
 
 private struct CommandCard: View {
     let command: String
+    var isUninstall = false
     let isInspection: Bool
     let onCopy: () -> Void
     @State private var copied = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label(isInspection ? "Inspect in Terminal" : "Cleanup command", systemImage: "terminal")
+            Label(isUninstall ? "How to uninstall" : isInspection ? "Inspect in Terminal" : "Cleanup command", systemImage: "terminal")
                 .font(.headline)
             Text(command).font(.callout.monospaced()).textSelection(.enabled)
                 .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                 .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
-            Text(isInspection ? "This command lists information. Use the owning tool to choose what to remove." : "Recursively deletes this directory without confirmation and bypasses Trash. Review the exact path and back up local changes before running.")
+            Text(isUninstall ? "Run this command in Terminal to uninstall this CLI or runtime version and reclaim its storage." : isInspection ? "This command lists information. Use the owning tool to choose what to remove." : "Recursively deletes this directory without confirmation and bypasses Trash. Review the exact path and back up local changes before running.")
                 .font(.caption).foregroundStyle(.secondary)
             Button(copied ? "Copied" : "Copy command", systemImage: copied ? "checkmark" : "doc.on.doc") {
                 NSPasteboard.general.clearContents()
